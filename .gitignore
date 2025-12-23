@@ -1,3 +1,6 @@
-__pycache__/*
-dump/__pycache__/*
+estimators/__pycache__/*
+optimizers/__pycache__/*
+problems/__pycache__/*
+tests/__pycache__/*
+utils/__pycache__/*
 results/*

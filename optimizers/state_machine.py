@@ -2,7 +2,6 @@ import numpy as np
 import scipy as cp
 from numpy.linalg import norm
 from enum import Enum, unique
-from dump.sandboxfn import *
 
 
 @unique
@@ -26,7 +25,6 @@ class BaseOptim:
         stepsizemode: StepSizeMode = StepSizeMode.FIXED,
         bfgs: bool = False,
     ):
-
         # Store the data set
         self.Xn = Xn
         self.Zn = np.array(Zn)
@@ -42,7 +40,7 @@ class BaseOptim:
         self.state = State.REFINE_GDT  # self.state is by default REFINE_GDT
         self.gdt_est = np.zeros(self.D)
         self.gdt_est_rdy = False
-        self.ns_est = 0.0 # Estimated noise bounds (if available from the specific solver)
+        self.ns_est = 0.0  # Estimated noise bounds (if available from the specific solver)
 
         # Step size-related parameters
         self.eta0 = stepsize  # Default step size
@@ -93,7 +91,7 @@ class BaseOptim:
 
     # Method add_samples when supplying a sampled value
     def add_value(self, zadd: float):
-        return super().add_samples(self.x_n, zadd)
+        return self.add_samples(self.x_n, zadd)
 
     def state_machine(self):
         if self.state == State.REFINE_GDT:
@@ -147,6 +145,7 @@ class BaseOptim:
                     self.eta = self.eta0
                 self.x_n = self.x_k - self.eta * self.gdt_est
 
+
 class FFDOpt(BaseOptim):
     def __init__(
         self,
@@ -161,16 +160,20 @@ class FFDOpt(BaseOptim):
 
         self.ffd_step = ffdstep
         self.ffd_samples = 0
-        self.ffd_Xn      = np.empty((0,self.D))
-        self.ffd_Zn      = np.empty(0)
+        self.ffd_Xn = np.empty((0, self.D))
+        self.ffd_Zn = np.empty(0)
         self.add_samples_gdtest(None, None)
 
         self.state_machine()
 
     def add_samples_gdtest(self, Xadd, Zadd):
         if self.state == State.REFINE_GDT and self.ffd_samples < self.D:
-            if Xadd is not None and Zadd is not None and \
-                (Xadd != self.x_k).any() and (Zadd != self.z_k).any():
+            if (
+                Xadd is not None
+                and Zadd is not None
+                and (Xadd != self.x_k).any()
+                and (Zadd != self.z_k).any()
+            ):
                 self.ffd_Xn = np.vstack((self.ffd_Xn, Xadd))
                 self.ffd_Zn = np.hstack((self.ffd_Zn, Zadd))
                 self.ffd_samples += 1
@@ -189,7 +192,7 @@ class FFDOpt(BaseOptim):
                 # Start to actually calculate the gradient estimate
                 self.gdt_est = np.zeros(self.D)
                 for idx in range(self.D):
-                    self.gdt_est[idx] = (self.ffd_Zn[idx] - self.z_k)/self.ffd_step
+                    self.gdt_est[idx] = (self.ffd_Zn[idx] - self.z_k) / self.ffd_step
 
                 # Reset data used for FFD calculations
                 self.ffd_samples = 0
@@ -197,6 +200,7 @@ class FFDOpt(BaseOptim):
                 self.ffd_Zn = np.empty(0)
 
                 self.gdt_est_rdy = True
+
 
 class CFDOpt(BaseOptim):
     def __init__(
@@ -212,16 +216,20 @@ class CFDOpt(BaseOptim):
 
         self.cfd_step = cfdstep
         self.cfd_samples = 0
-        self.cfd_Xn      = np.empty((0,self.D))
-        self.cfd_Zn      = np.empty(0)
+        self.cfd_Xn = np.empty((0, self.D))
+        self.cfd_Zn = np.empty(0)
         self.add_samples_gdtest(None, None)
 
         self.state_machine()
 
     def add_samples_gdtest(self, Xadd, Zadd):
-        if self.state == State.REFINE_GDT and self.cfd_samples < 2*self.D:
-            if Xadd is not None and Zadd is not None and \
-                (Xadd != self.x_k).any() and (Zadd != self.z_k).any():
+        if self.state == State.REFINE_GDT and self.cfd_samples < 2 * self.D:
+            if (
+                Xadd is not None
+                and Zadd is not None
+                and (Xadd != self.x_k).any()
+                and (Zadd != self.z_k).any()
+            ):
                 self.cfd_Xn = np.vstack((self.cfd_Xn, Xadd))
                 self.cfd_Zn = np.hstack((self.cfd_Zn, Zadd))
                 self.cfd_samples += 1
@@ -241,7 +249,9 @@ class CFDOpt(BaseOptim):
                 # Start to actually calculate the gradient estimate
                 self.gdt_est = np.zeros(self.D)
                 for idx in range(self.D):
-                    self.gdt_est[idx] = (self.cfd_Zn[2*idx] - self.cfd_Zn[2*idx+1])/(2*self.cfd_step)
+                    self.gdt_est[idx] = (
+                        self.cfd_Zn[2 * idx] - self.cfd_Zn[2 * idx + 1]
+                    ) / (2 * self.cfd_step)
 
                 # Reset data used for CFD calculations
                 self.cfd_samples = 0
@@ -250,129 +260,183 @@ class CFDOpt(BaseOptim):
 
                 self.gdt_est_rdy = True
 
+
 class GSGOpt(BaseOptim):
-    def __init__(self, Xn:np.ndarray, Zn:np.ndarray, m:int, stepsize:float=1.0, stepsizemode:StepSizeMode=StepSizeMode.ADAPTIVE, u:float=1e-6, bfgs: bool = False):   
+    def __init__(
+        self,
+        Xn: np.ndarray,
+        Zn: np.ndarray,
+        m: int,
+        stepsize: float = 1.0,
+        stepsizemode: StepSizeMode = StepSizeMode.ADAPTIVE,
+        u: float = 1e-6,
+        bfgs: bool = False,
+        seed: int | None = None,
+    ):
         super().__init__(Xn, Zn, stepsize, stepsizemode, bfgs)
 
-        self.u           = u
-        self.m           = m
+        self.u = u
+        self.m = m
 
-        self.e_gen       = np.random.default_rng()
-        self.e           = self.e_gen.normal(size=(self.m,self.D))
-        
+        self.e_gen = np.random.default_rng(seed)
+        self.e = self.e_gen.normal(size=(self.m, self.D))
+
         self.gsg_samples = 0
-        self.gsg_Xn      = np.empty((0,self.D))
-        self.gsg_Zn      = np.empty(0)
+        self.gsg_Xn = np.empty((0, self.D))
+        self.gsg_Zn = np.empty(0)
         self.add_samples_gdtest(None, None)
 
         self.state_machine()
 
     def add_samples_gdtest(self, Xadd, Zadd):
         if self.state == State.REFINE_GDT and self.gsg_samples < self.m:
-            if Xadd is not None and Zadd is not None and \
-                (Xadd != self.x_k).any() and (Zadd != self.z_k).any():
-                self.gsg_Xn = np.vstack((self.gsg_Xn,Xadd))
-                self.gsg_Zn = np.hstack((self.gsg_Zn,Zadd))
+            if (
+                Xadd is not None
+                and Zadd is not None
+                and (Xadd != self.x_k).any()
+                and (Zadd != self.z_k).any()
+            ):
+                self.gsg_Xn = np.vstack((self.gsg_Xn, Xadd))
+                self.gsg_Zn = np.hstack((self.gsg_Zn, Zadd))
                 self.gsg_samples += 1
-            
+
             if self.gsg_samples < self.m:
                 self.state = State.REFINE_GDT
 
                 # I generate the next sampling point by iterating
                 #   through the CFD steps from the current iterate
-                e = self.e[self.gsg_samples,:]
+                e = self.e[self.gsg_samples, :]
 
-                self.x_n = self.x_k + self.u*e
+                self.x_n = self.x_k + self.u * e
                 self.gdt_est_rdy = False
             else:
                 # Start to actually calculate the gradient estimate
                 self.gdt_est = np.zeros(self.D)
                 for idx in range(self.m):
-                    self.gdt_est += (self.gsg_Zn[idx] - self.z_k)/self.u * self.e[idx,:]
+                    self.gdt_est += (self.gsg_Zn[idx] - self.z_k) / self.u * self.e[
+                        idx, :
+                    ]
                 self.gdt_est /= self.m
 
-                if np.max(abs((self.gsg_Xn[-1,:]-self.x_k)/self.u - self.e[-1,:])) > 1e-4:
+                if (
+                    np.max(
+                        abs((self.gsg_Xn[-1, :] - self.x_k) / self.u - self.e[-1, :])
+                    )
+                    > 1e-4
+                ):
                     self.gdt_est = 0
 
                 # Reset data used for CFD calculations
                 self.gsg_samples = 0
-                self.gsg_Xn      = np.empty((0,self.D))
-                self.gsg_Zn      = np.empty(0)
-                self.e           = self.e_gen.normal(size=(self.m,self.D))
+                self.gsg_Xn = np.empty((0, self.D))
+                self.gsg_Zn = np.empty(0)
+                self.e = self.e_gen.normal(size=(self.m, self.D))
 
                 self.gdt_est_rdy = True
 
+
 class cGSGOpt(BaseOptim):
-    def __init__(self, Xn:np.ndarray, Zn:np.ndarray, m:int, stepsize:float=1.0, 
-                 stepsizemode:StepSizeMode=StepSizeMode.ADAPTIVE, u:float=1e-6, bfgs: bool = False):   
+    def __init__(
+        self,
+        Xn: np.ndarray,
+        Zn: np.ndarray,
+        m: int,
+        stepsize: float = 1.0,
+        stepsizemode: StepSizeMode = StepSizeMode.ADAPTIVE,
+        u: float = 1e-6,
+        bfgs: bool = False,
+        seed: int | None = None,
+    ):
         super().__init__(Xn, Zn, stepsize, stepsizemode, bfgs)
 
-        self.u           = u
-        self.m           = m
+        self.u = u
+        self.m = m
 
-        self.e_gen       = np.random.default_rng()
-        self.e           = self.e_gen.normal(size=(self.m,self.D))
-        
+        self.e_gen = np.random.default_rng(seed)
+        self.e = self.e_gen.normal(size=(self.m, self.D))
+
         self.cgsg_samples = 0
-        self.cgsg_Xn      = np.empty((0,self.D))
-        self.cgsg_Zn      = np.empty(0)
+        self.cgsg_Xn = np.empty((0, self.D))
+        self.cgsg_Zn = np.empty(0)
         self.add_samples_gdtest(None, None)
 
         self.state_machine()
 
     def add_samples_gdtest(self, Xadd, Zadd):
-        if self.state == State.REFINE_GDT and self.cgsg_samples < 2*self.m:
-            if Xadd is not None and Zadd is not None and \
-                (Xadd != self.x_k).any() and (Zadd != self.z_k).any():
-                self.cgsg_Xn = np.vstack((self.cgsg_Xn,Xadd))
-                self.cgsg_Zn = np.hstack((self.cgsg_Zn,Zadd))
+        if self.state == State.REFINE_GDT and self.cgsg_samples < 2 * self.m:
+            if (
+                Xadd is not None
+                and Zadd is not None
+                and (Xadd != self.x_k).any()
+                and (Zadd != self.z_k).any()
+            ):
+                self.cgsg_Xn = np.vstack((self.cgsg_Xn, Xadd))
+                self.cgsg_Zn = np.hstack((self.cgsg_Zn, Zadd))
                 self.cgsg_samples += 1
-            
-            if self.cgsg_samples < 2*self.m:
+
+            if self.cgsg_samples < 2 * self.m:
                 self.state = State.REFINE_GDT
 
                 # I generate the next sampling point by iterating
                 #   through the CFD steps from the current iterate
-                sgn = (-1)**self.cgsg_samples
-                e = self.e[int(self.cgsg_samples/2),:]
+                sgn = (-1) ** self.cgsg_samples
+                e = self.e[int(self.cgsg_samples / 2), :]
 
-                self.x_n = self.x_k + sgn*self.u*e
+                self.x_n = self.x_k + sgn * self.u * e
                 self.gdt_est_rdy = False
             else:
                 # Start to actually calculate the gradient estimate
                 self.gdt_est = np.zeros(self.D)
                 for idx in range(self.m):
-                    self.gdt_est += (self.cgsg_Zn[2*idx] - self.cgsg_Zn[2*idx+1])/(2*self.u) * self.e[idx,:]
+                    self.gdt_est += (self.cgsg_Zn[2 * idx] - self.cgsg_Zn[2 * idx + 1]) / (
+                        2 * self.u
+                    ) * self.e[idx, :]
                 self.gdt_est /= self.m
 
-                if np.max(abs((self.cgsg_Xn[-2,:]-self.x_k)/self.u - self.e[-1,:])) > 1e-4:
+                if (
+                    np.max(
+                        abs((self.cgsg_Xn[-2, :] - self.x_k) / self.u - self.e[-1, :])
+                    )
+                    > 1e-4
+                ):
                     self.gdt_est = 0
 
                 # Reset data used for CFD calculations
                 self.cgsg_samples = 0
-                self.cgsg_Xn      = np.empty((0,self.D))
-                self.cgsg_Zn      = np.empty(0)
-                self.e           = self.e_gen.normal(size=(self.m,self.D))
+                self.cgsg_Xn = np.empty((0, self.D))
+                self.cgsg_Zn = np.empty(0)
+                self.e = self.e_gen.normal(size=(self.m, self.D))
 
                 self.gdt_est_rdy = True
 
+
 class NMXFDOpt(BaseOptim):
-    def __init__(self, Xn:np.ndarray, Zn:np.ndarray, m:int, stepsize:float=1.0, stepsizemode:StepSizeMode=StepSizeMode.ADAPTIVE,  
-                 rangeintegral:tuple=(-2,2), numpoints:int=4, sigma:float=1e-2, lmbd:float=1e-3, bfgs: bool = False):   
+    def __init__(
+        self,
+        Xn: np.ndarray,
+        Zn: np.ndarray,
+        m: int,
+        stepsize: float = 1.0,
+        stepsizemode: StepSizeMode = StepSizeMode.ADAPTIVE,
+        rangeintegral: tuple = (-2, 2),
+        numpoints: int = 4,
+        sigma: float = 1e-2,
+        lmbd: float = 1e-3,
+        bfgs: bool = False,
+    ):
         super().__init__(Xn, Zn, stepsize, stepsizemode, bfgs)
 
-        self.n_u   = numpoints
-        self.u     = np.linspace(rangeintegral[0], rangeintegral[1], numpoints, dtype='d')
+        self.n_u = numpoints
+        self.u = np.linspace(rangeintegral[0], rangeintegral[1], numpoints, dtype="d")
         self.delta = self.u[1] - self.u[0]
         self.sigma = sigma
-        self.lmbd  = lmbd
-        self.dphi  = -self.gaussian_derivative(self.u, 0, 1).reshape(-1, 1)
-        self.m     = m
+        self.lmbd = lmbd
+        self.dphi = -self.gaussian_derivative(self.u, 0, 1).reshape(-1, 1)
+        self.m = m
 
-        
         self.nmxfd_samples = 0
-        self.nmxfd_Xn      = np.empty((0,self.D))
-        self.nmxfd_Zn      = np.empty(0)
+        self.nmxfd_Xn = np.empty((0, self.D))
+        self.nmxfd_Zn = np.empty(0)
         self.add_samples_gdtest(None, None)
 
         self.state_machine()
@@ -382,44 +446,50 @@ class NMXFDOpt(BaseOptim):
         # Compute the denominator (normalization factor for Gaussian derivative)
         denominator = np.sqrt(2 * np.pi) * (sigma**3)
         # Compute the numerator (scaled Gaussian function)
-        numerator = (x - mu) * np.exp(-((x - mu)**2) / (2 * sigma**2))
+        numerator = (x - mu) * np.exp(-((x - mu) ** 2) / (2 * sigma**2))
         # Return the derivative
         return -numerator / denominator
 
     def add_samples_gdtest(self, Xadd, Zadd):
-        if self.state == State.REFINE_GDT and self.nmxfd_samples < self.D*len(self.u):
-            if Xadd is not None and Zadd is not None and \
-                (Xadd != self.x_k).any() and (Zadd != self.z_k).any():
-                self.nmxfd_Xn = np.vstack((self.nmxfd_Xn,Xadd))
-                self.nmxfd_Zn = np.hstack((self.nmxfd_Zn,Zadd))
+        if self.state == State.REFINE_GDT and self.nmxfd_samples < self.D * len(self.u):
+            if (
+                Xadd is not None
+                and Zadd is not None
+                and (Xadd != self.x_k).any()
+                and (Zadd != self.z_k).any()
+            ):
+                self.nmxfd_Xn = np.vstack((self.nmxfd_Xn, Xadd))
+                self.nmxfd_Zn = np.hstack((self.nmxfd_Zn, Zadd))
                 self.nmxfd_samples += 1
-            
-            if self.nmxfd_samples < self.D*self.n_u:
+
+            if self.nmxfd_samples < self.D * self.n_u:
                 self.state = State.REFINE_GDT
 
                 # I generate the next sampling point by iterating
                 #   through the NMXFD steps from the current iterate
-                dim = int(self.nmxfd_samples/self.n_u)
+                dim = int(self.nmxfd_samples / self.n_u)
                 stp = self.nmxfd_samples % self.n_u
                 dx = np.zeros(self.D)
                 dx[dim] = self.u[stp]
                 self.x_n = self.x_k + dx
-                
+
                 self.gdt_est_rdy = False
             else:
                 self.gdt_est = np.zeros(self.D)
 
                 # Start to actually calculate the gradient estimate
                 for j in range(self.D):
-                    res = self.nmxfd_Zn[(j*self.n_u):(j*self.n_u+self.n_u)]
-                    differences = np.array([
-                        res[::-1][k] - res[k] for k in range(self.n_u // 2)
-                    ]).reshape(-1, 1) # Compute finite differences by calculating difference from opposite ends of the array
-                    phi_coeff = np.abs(self.dphi[:self.n_u // 2])
+                    res = self.nmxfd_Zn[(j * self.n_u) : (j * self.n_u + self.n_u)]
+                    differences = np.array(
+                        [res[::-1][k] - res[k] for k in range(self.n_u // 2)]
+                    ).reshape(
+                        -1, 1
+                    )  # Compute finite differences by calculating difference from opposite ends of the array
+                    phi_coeff = np.abs(self.dphi[: self.n_u // 2])
 
                     # Calculate integration coefficients
                     h = (self.u[-1] - self.u[0]) / (self.n_u - 1)
-                    mult = self.u[::-1][:self.n_u // 2].reshape(-1, 1).astype(float)
+                    mult = self.u[::-1][: self.n_u // 2].reshape(-1, 1).astype(float)
                     coeff = phi_coeff * mult * h
                     coeff[0] /= 2  # Adjust for boundary conditions
 
@@ -429,13 +499,14 @@ class NMXFDOpt(BaseOptim):
                     # Compute gradient contribution for the current dimension
                     output = normd_coeff * differences / (mult * self.sigma) / 2
                     self.gdt_est[j] = np.sum(output)
-                    
+
                 # Reset data used for NMXFD calculations
                 self.nmxfd_samples = 0
-                self.nmxfd_Xn      = np.empty((0,self.D))
-                self.nmxfd_Zn      = np.empty(0)
+                self.nmxfd_Xn = np.empty((0, self.D))
+                self.nmxfd_Zn = np.empty(0)
 
                 self.gdt_est_rdy = True
+
 
 class SAGEOpt(BaseOptim):
     def __init__(
@@ -451,20 +522,22 @@ class SAGEOpt(BaseOptim):
     ):
         super().__init__(Xn, Zn, stepsize, stepsizemode, bfgs)
 
-        self.gdtset_diaid = 0.05   # Ideal gradient set diameter
-        self.gdtset_diath = 0.05   # Gradient set maximum diameter. If the estimated gradient
-                                   #   set diameter is higher than this, we try additional
-                                   #   samples to shrink the gradient set.
-        self.gdt_est_frc = False   # A flag to force the acceptance of the current gradient estimate
-                                   #   e.g., when are too many auxiliary samples already done
+        self.gdtset_diaid = 0.05  # Ideal gradient set diameter
+        self.gdtset_diath = 0.05  # Gradient set maximum diameter. If the estimated gradient
+        #   set diameter is higher than this, we try additional
+        #   samples to shrink the gradient set.
+        self.gdt_est_frc = False  # A flag to force the acceptance of the current gradient estimate
+        #   e.g., when are too many auxiliary samples already done
 
         # Gradient estimator-relevant quantities
         self.autonoise = autonoise  # Do we need to estimate the noise?
-        self.ns_est = noisebnd      # Estimated noise bounds
+        self.ns_est = 0.0 if autonoise else noisebnd  # Estimated noise bounds
+        self.hess_norm = 0.0
+        self.hess_lipsc = 0.0
         self.A2 = None
         self.b2 = None
-        self.gd_v = np.nan          # Chord vector defining the gradient set diameter
-        self.gd_vm = np.inf         # Gradient set diameter
+        self.gd_v = np.nan  # Chord vector defining the gradient set diameter
+        self.gd_vm = np.inf  # Gradient set diameter
 
         self.quickmode = quickmode  # Compute gradient estimates only from limited samples around current iterate
 
@@ -502,8 +575,8 @@ class SAGEOpt(BaseOptim):
 
         # If quickcalc is enabled, collect only 5*D number of samples
         # according to distance from the current iterate
-        if self.Zn.size > 5*self.D + 1 and self.quickmode:
-            coll_x   = [self.Xn[j] for j in range(self.Zn.size) if j not in x_idx]
+        if self.Zn.size > 5 * self.D + 1 and self.quickmode:
+            coll_x = [self.Xn[j] for j in range(self.Zn.size) if j not in x_idx]
             coll_idx = [j for j in range(self.Zn.size) if j not in x_idx]
 
             # Computing the best radius from x_k for optimal gradient set uncertainty
@@ -520,8 +593,8 @@ class SAGEOpt(BaseOptim):
             else:
                 alpha = alpha.real[0]
 
-            cost_fn = np.abs(np.sum((coll_x - x)**2, axis=1) - alpha**2)
-            sort_idx = np.argsort(cost_fn)[:5*self.D]
+            cost_fn = np.abs(np.sum((coll_x - x) ** 2, axis=1) - alpha**2)
+            sort_idx = np.argsort(cost_fn)[: 5 * self.D]
             coll_idx = [coll_idx[j] for j in sort_idx]
         else:
             coll_idx = [j for j in range(self.Zn.size) if j not in x_idx]
@@ -553,7 +626,7 @@ class SAGEOpt(BaseOptim):
 
             if np.isnan(A).any():
                 raise ValueError("Matrix A should not have any NaN entries.")
-            
+
         if not self.autonoise:
             Ae = np.vstack((A, np.hstack((np.zeros(A.shape[1] - 2), -1, 0))))
             Ae = np.vstack((Ae, np.hstack((np.zeros(A.shape[1] - 2), 0, -1))))
@@ -687,10 +760,10 @@ class SAGEOpt(BaseOptim):
                     # rt always contains 3 roots: 1 real-positive and 2 complex
                     # roots. The real root is the one we are interested in.
                     alpha = rt[np.isreal(rt) & (rt.real >= 0)].real[0]
-                    self.gdtset_diath = 1.01 * alpha # Just a little multiplier for safety 
-                                                     # (not getting stuck in gradient refinement stage)
+                    self.gdtset_diath = 1.01 * alpha  # Just a little multiplier for safety
+                    # (not getting stuck in gradient refinement stage)
 
-                self.x_n = self.x_k + alpha * self.gd_v / norm(self.gd_v)                
+                self.x_n = self.x_k + alpha * self.gd_v / norm(self.gd_v)
                 self.aux_samples += 1
 
                 # If taking too much iterations on sampling, just force the line search
