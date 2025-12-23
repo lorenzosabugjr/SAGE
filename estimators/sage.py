@@ -38,6 +38,7 @@ class SAGE(BaseGradientEstimator):
         quickmode: bool = True,
         initial_history: Optional[tuple[np.ndarray, np.ndarray]] = None,
         history: Optional[HistoryBuffer] = None,
+        diam_mode: Optional[str] = None,
     ):
         """
         Initialize the SAGE estimator.
@@ -51,12 +52,17 @@ class SAGE(BaseGradientEstimator):
             quickmode: Whether to use a subset of neighbors for faster computation.
             initial_history: Optional tuple (X, Z) of past evaluations to seed the history.
             history: Optional shared HistoryBuffer used to collect evaluations.
+            diam_mode: "exact" or "approx". Defaults to "approx" when quickmode is True.
         """
         super().__init__(fun, dim, history=history)
         self.noise_type = noise_type
         self.noise_param = noise_param
         self.autonoise = autonoise
         self.quickmode = quickmode
+        if diam_mode is None:
+            self.diam_mode = "approx" if quickmode else "exact"
+        else:
+            self.diam_mode = diam_mode
 
         if self.history is None:
             self.history = HistoryBuffer()
@@ -221,6 +227,11 @@ class SAGE(BaseGradientEstimator):
 
 
     def _calc_diam(self):
+        if self.diam_mode == "approx":
+            return self._calc_diam_approx()
+        return self._calc_diam_exact()
+
+    def _calc_diam_exact(self):
         """
         Calculates the diameter of the current gradient consistency set.
 
@@ -253,6 +264,40 @@ class SAGE(BaseGradientEstimator):
         )
 
         self.gd_v = res.x[:D] - res.x[D:]
+        self.gd_vm = np.linalg.norm(self.gd_v)
+        return self.gd_vm
+
+    def _calc_diam_approx(self):
+        """
+        Fast approximate diameter using axis-aligned bounds from LPs.
+
+        This computes a bounding-box diameter, which is an upper bound on the true
+        diameter and avoids the non-convex SLSQP solve.
+        """
+        D = self.dim
+        if self.Al is None or self.bl is None or self.Al.size == 0:
+            return np.inf
+
+        max_g = np.empty(D)
+        min_g = np.empty(D)
+
+        for i in range(D):
+            c = np.zeros(D)
+            c[i] = -1.0
+            res = cp.optimize.linprog(c, A_ub=self.Al, b_ub=self.bl, bounds=(None, None), method="highs")
+            if not res.success:
+                self.gd_vm = np.inf
+                return self.gd_vm
+            max_g[i] = -res.fun
+
+            c[i] = 1.0
+            res = cp.optimize.linprog(c, A_ub=self.Al, b_ub=self.bl, bounds=(None, None), method="highs")
+            if not res.success:
+                self.gd_vm = np.inf
+                return self.gd_vm
+            min_g[i] = res.fun
+
+        self.gd_v = max_g - min_g
         self.gd_vm = np.linalg.norm(self.gd_v)
         return self.gd_vm
 

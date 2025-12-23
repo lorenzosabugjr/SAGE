@@ -71,6 +71,13 @@ g1, g2 in G~^(i)  ->  A2 * [g1, g2] <= b2
 
 The diameter is approximated by a non-convex optimization using SLSQP. This is a local solve and is not guaranteed to find the global maximum diameter, but works well in practice.
 
+### Fast approximate mode
+
+When `diam_mode="approx"` (default when `quickmode=True`), SAGE computes an axis-aligned
+bounding box by solving `2*D` LPs for the min/max of each coordinate. The resulting
+diagonal length is an upper bound on the true diameter. This is faster than SLSQP but
+can be conservative (may trigger extra refinement).
+
 ## 5. Active sampling loop
 
 For each call:

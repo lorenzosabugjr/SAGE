@@ -29,6 +29,7 @@ grad_estimator = SAGE(
     noise_param=0.01,
     autonoise=True,
     quickmode=True,
+    # diam_mode defaults to "approx" when quickmode=True
 )
 
 # 3. Compute the gradient
@@ -61,6 +62,7 @@ grad_estimator = SAGE(
 
 SAGE behaves like a standard callable, making it compatible with `scipy.optimize.minimize`.
 Since SAGE may perform extra evaluations, keep your own evaluation budget if you need strict limits.
+SAGE returns a gradient vector for scalar objectives (the `jac` callable in `minimize`), not a full Jacobian for vector-valued objectives.
 
 If you want SAGE to reuse *all* evaluations (including line search steps), share a `HistoryBuffer`
 between the objective and the estimator.
@@ -82,7 +84,7 @@ grad_estimator = SAGE(
 res = minimize(
     fun=fun_logged,
     x0=np.random.rand(5),
-    jac=grad_estimator,  # Pass SAGE as the jacobian
+    jac=grad_estimator,  # Gradient callable (vector) for scalar objective
     method='BFGS'
 )
 

@@ -18,7 +18,8 @@ class SAGE(BaseGradientEstimator):
         autonoise: bool = True,
         quickmode: bool = True,
         initial_history: Optional[tuple[np.ndarray, np.ndarray]] = None,
-        history: Optional[HistoryBuffer] = None
+        history: Optional[HistoryBuffer] = None,
+        diam_mode: Optional[str] = None
     )
 ```
 
@@ -31,6 +32,7 @@ class SAGE(BaseGradientEstimator):
 *   `quickmode`: If `True`, uses a filtered subset of samples for faster LP solving.
 *   `initial_history`: Optional tuple `(X, Z)` to seed the history, where `X` is `(N, dim)` and `Z` is `(N,)`.
 *   `history`: Optional shared `HistoryBuffer` used to collect all evaluations (e.g., from line search).
+*   `diam_mode`: `"exact"` or `"approx"`. Defaults to `"approx"` when `quickmode=True`.
 
 ---
 

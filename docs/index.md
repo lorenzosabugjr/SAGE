@@ -2,7 +2,7 @@
 
 Welcome to the documentation for **SAGE** (Set-based Adaptive Gradient Estimator).
 
-SAGE is a Python library implementing a robust, data-efficient gradient estimation algorithm for noisy black-box functions, based on Set Membership Identification theory.
+SAGE is a Python library implementing a robust, data-efficient gradient estimation algorithm for noisy black-box functions, based on Set Membership Identification theory. It is also available as a SciPy-compatible gradient callable; see the "Integration with Scipy" section in the Quickstart.
 
 ## Contents
 
