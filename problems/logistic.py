@@ -19,11 +19,10 @@ class L1LogReg(BaseProblem):
     def _eval_deterministic(self, x: np.ndarray) -> float:
         clp = 200
         z = clp*np.tanh(self.b@self.A@x / clp)
+        # z = self.b@self.A@x
         q = np.log(1 + np.exp(-z)) + self.lmbd * abs(x).sum()
-        if np.isnan(q):
-             # Fallback logic if needed, but keeping original print for now if relevant, 
-             # though strictly we return float. Original code printed z.
-             pass
+        if q == np.nan:
+            print(z)
         return q
 
 class L2LogReg(BaseProblem):
@@ -44,5 +43,6 @@ class L2LogReg(BaseProblem):
     def _eval_deterministic(self, x: np.ndarray) -> float:
         clp = 200
         z = clp*np.tanh(self.b@self.A@x / clp)
+        # z = self.b@self.A@x
         q = np.log(1 + np.exp(-z)) + self.lmbd/2 * np.dot(x,x)
         return q

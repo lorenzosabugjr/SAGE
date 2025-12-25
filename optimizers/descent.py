@@ -22,15 +22,21 @@ class StandardDescent:
         stepsize: float = 1.0,
         stepsizemode: StepSizeMode = StepSizeMode.ADAPTIVE,
         bfgs: bool = False,
+        z0: Optional[float] = None,
+        callback: Optional[Callable[[float], None]] = None,
     ):
         self.fun = fun
         self.x_k = x0.copy()
         self.D = x0.shape[0]
         self.grad_estimator = grad_estimator
+        self.callback = callback
         
         # Optimization state
-        self.z_k = self.fun(self.x_k)
-        self.grad_estimator.update(self.x_k, self.z_k)
+        if z0 is not None:
+            self.z_k = z0
+        else:
+            self.z_k = self.fun(self.x_k)
+            
         self.k = 0
         
         # Step size parameters
@@ -59,8 +65,10 @@ class StandardDescent:
         4. Performs a backtracking line search (if ADAPTIVE) to find a valid step length.
         5. Updates x_k and z_k.
         """
+        if self.callback:
+            self.callback(self.z_k)
+
         # 1. Estimate Gradient
-        # SAGE (or others) might do active sampling here
         self.gdt_est = self.grad_estimator(self.x_k)
         
         # 2. BFGS Update (if enabled and not first step)
@@ -90,33 +98,34 @@ class StandardDescent:
 
         # 4. Line Search
         if self.eta_mode == StepSizeMode.ADAPTIVE:
-            # Backtracking line search (Armijo)
-            # We want z_next <= z_k + c * eta * grad^T * p_k
-            # grad^T * p_k is usually negative.
-            # Here implementation mimics original: 
-            # condition: z_n <= z_k - etaT * eta * norm(grad)^2
-            # Wait, original code for BFGS used: x_n = -eta * H * g + x_k
-            # And condition: z_n <= z_k - etaT * eta * norm(g)**2 ??
-            # Usually for BFGS it involves p_k. 
-            # But let's stick to the original logic for fidelity if possible, 
-            # or upgrade to standard Armijo on p_k.
-            # Original code check:
-            # if (self.z_n <= self.z_k - self.etaT * self.eta * norm(self.gdt_est) ** 2):
-            
-            # We will use the direction p_k. 
-            # If standard GD, p_k = -g, so p_k^T g = -|g|^2.
-            # So condition z <= z - c * alpha * |g|^2 is standard for GD.
-            # For BFGS, we should check descent direction.
-            
+            # Active Line Search Loop
+            ls_iter = 0
             while True:
+                ls_iter += 1
+                if ls_iter > 100:
+                    # Safety break
+                    break
+                
                 x_next = self.x_k + self.eta * p_k
                 z_next = self.fun(x_next)
+                
+                # Update estimator history with the new point
                 self.grad_estimator.update(x_next, z_next)
                 
-                # Check Armijo
-                # Note: Original code used norm(gdt_est)**2 regardless of BFGS. 
-                # This might be a simplification or specific design choice in SAGE paper.
-                # We will preserve it for now to match benchmark behavior.
+                # Check Armijo condition
+                # Note: Legacy SAGE behavior uses norm(g)**2 of the LATEST gradient
+                # But here we check against the gradient used for the step?
+                # Upstream: z_n <= z_k - etaT * eta * norm(gdt_est)**2
+                # gdt_est in upstream is updated AFTER add_samples calls update_gradient.
+                # So it uses the NEW gradient for the condition?
+                # Let's check upstream state_machine.py again carefully.
+                # add_samples -> add_samples_gdtest -> update_gradient -> grad_est (computes NEW g)
+                # THEN state_machine() is called.
+                # state_machine uses self.gdt_est (which is NEW).
+                # So yes, we should re-estimate gradient NOW.
+                
+                # IMPORTANT: Pass allow_refinement=False to prevent auxiliary sampling during line search!
+                self.gdt_est = self.grad_estimator(self.x_k, allow_refinement=False)
                 descent_term = norm(self.gdt_est)**2
                 
                 if z_next <= self.z_k - self.etaT * self.eta * descent_term:
@@ -124,28 +133,41 @@ class StandardDescent:
                     self.x_k = x_next
                     self.z_k = z_next
                     self.k += 1
-                    # Increase step size slightly for next iter? 
-                    # Original code: self.eta = self.eta / self.etaM (where etaM=0.5 -> multiply by 2)
                     self.eta = self.eta / self.etaM
+                    if self.callback:
+                        self.callback(self.z_k)
                     break
                 else:
-                    # Rejected, reduce step size
-                    self.eta = self.eta * self.etaM
-                    if self.eta < 1e-9:
-                        # Step too small, accept anyway or stop?
-                        # Original code: resets to eta0 if < 1e-6 and calls add_samples_gdtest(None,None)
-                        # We will just accept to avoid infinite loops, or break.
-                        self.x_k = x_next
-                        self.z_k = z_next
-                        self.k += 1
+                    # Rejected
+                    if self.eta > 1e-6:
+                        self.eta = self.eta * self.etaM
+                    else:
+                        # Reset
+                        # Upstream triggers an extra update_gradient() here via add_samples_gdtest(None, None)
+                        # This consumes RNG in grad_set_diam. We must match that.
+                        self.grad_estimator(self.x_k, allow_refinement=False, force=True)
                         self.eta = self.eta0
-                        break
+                        # Note: In upstream, it resets eta then computes x_n = x_k - eta * g.
+                        # Since we loop, we update p_k below and then x_next will be computed with eta0.
+                    
+                    # Update search direction with NEW gradient
+                    if self.bfgs:
+                         p_k = -self.bfgs_hinv @ self.gdt_est
+                    else:
+                         p_k = -self.gdt_est
+                    
+                    if self.callback:
+                        self.callback(self.z_k)
+                         
+                    # Continue loop to try new x_next with new p_k and new/old eta
         else:
             # Fixed step size
             self.x_k = self.x_k + self.eta0 * p_k
             self.z_k = self.fun(self.x_k)
             self.grad_estimator.update(self.x_k, self.z_k)
             self.k += 1
+            if self.callback:
+                self.callback(self.z_k)
             
     def run(self, max_evals: int):
         """Run until max evaluations reached (approximate control)."""

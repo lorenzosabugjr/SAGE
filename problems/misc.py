@@ -19,5 +19,6 @@ class LogSumExp(BaseProblem):
     def _eval_deterministic(self, x: np.ndarray) -> float:
         clp = 150
         z = clp*np.tanh((self.A@x - self.b)/clp)
+        # z = self.A@x - self.b
         q = np.log(np.exp(z).sum()) + self.lmbd/2 * np.dot(x,x)
         return q

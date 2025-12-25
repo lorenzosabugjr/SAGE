@@ -20,12 +20,13 @@ class BaseGradientEstimator(ABC):
         self.history = history
 
     @abstractmethod
-    def __call__(self, x: np.ndarray) -> np.ndarray:
+    def __call__(self, x: np.ndarray, **kwargs) -> np.ndarray:
         """
         Estimate the gradient at x.
         
         Args:
             x: The point at which to estimate the gradient.
+            **kwargs: Additional arguments for specific estimators.
             
         Returns:
             The estimated gradient vector.
