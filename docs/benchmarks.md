@@ -16,19 +16,20 @@ These match the definitions listed in the paper.
 
 ## 2. Settings
 
-Defaults in `tests/config.py`:
+Defaults in `tests/config.py` (current repo state):
 
-- Dimensions: `D in {5, 10, 20}`
-- Condition numbers: `{1.0, 1e4, 1e8}`
-- Noise parameters: `{1.0, 1e-3, 0.0}`
+- Dimensions: `[20]`
+- Condition numbers: `[1.0, 1e4, 1e8]`
+- Noise parameters: `[1.0, 1e-3]`
+- Noise types: `["gaussian"]`
 - Trials: `BMK_MAXTRIALS = 100`
-- Evaluation budget: `50 * D`
+- Evaluation budget: `50 * D` (wired in `tests/run_benchmarks.py`)
 
-The benchmarks in `tests/run_benchmarks.py` use **uniform noise** by default. If you want Gaussian noise, update the `noise_type` in that script.
+Noise sweeps are driven by `LIST_NOISE_TYPE` and `LIST_NOISE_PARAM` in `tests/config.py`.
 
 ## 3. Estimators and defaults
 
-The benchmark runner uses the following gradient estimators:
+The benchmark runner supports the following gradient estimators (set `LIST_GRAD_EST` in `tests/config.py`):
 
 - `FFD`: step size `1e-6`
 - `CFD`: step size `1e-6`
@@ -36,10 +37,12 @@ The benchmark runner uses the following gradient estimators:
 - `NMXFD`: default parameters in `estimators/finite_diff.py`
 - `SAGE`: uses a simplex-like initial history around `x0`
 
-All gradient estimators are run through the state-machine optimizers in `optimizers/state_machine.py`, which include backtracking line search.
+All gradient estimators are run through `StandardDescent` in `optimizers/descent.py`, which includes
+backtracking line search (`StepSizeMode.ADAPTIVE`).
 
-For deterministic comparisons, pass a fixed `seed` to `GSGOpt`/`cGSGOpt` (state-machine path). The
-default benchmarks keep RNG unseeded to mirror the original repository behavior.
+For deterministic comparisons, pass a fixed `seed` to `GSGEstimator`/`cGSGEstimator` (tests already
+use `trial_id` as the seed). `tests/runner.py` also seeds NumPy with `randseed` for problem setup
+and the initial point.
 
 ## 4. Running benchmarks
 

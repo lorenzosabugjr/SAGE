@@ -41,9 +41,8 @@ def run_all_benchmarks():
                             # Loop trials
                             for trial_i in range(BMK_MAXTRIALS):
                                 # Instantiate and Run
-                                # Map bmk_noise to noise_param
-                                # Assume Uniform noise for now to match legacy behavior
-                                # User can change config to test Gaussian
+                                # Map bmk_noise to noise_param.
+                                # Noise type is controlled by LIST_NOISE_TYPE in tests/config.py.
                                 
                                 try:
                                     noise_type = NoiseType.UNIFORM if bmk_noise_type == "uniform" else NoiseType.GAUSSIAN

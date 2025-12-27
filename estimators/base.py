@@ -18,6 +18,8 @@ class BaseGradientEstimator(ABC):
         self.fun = fun
         self.dim = dim
         self.history = history
+        # Indicates whether update() recomputes the gradient estimate.
+        self.recompute_on_update = False
 
     @abstractmethod
     def __call__(self, x: np.ndarray, **kwargs) -> np.ndarray:

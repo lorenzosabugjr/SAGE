@@ -107,6 +107,7 @@ Additional details:
 SAGE may evaluate `fun` at:
 
 - the query point `x` if it is not in history
+- the current center point after a move (even if already in history) to keep evaluation order consistent
 - multiple refinement points during a single call
 
 Track evaluation budgets explicitly if needed.

@@ -10,7 +10,7 @@ class HistoryBuffer:
     """
     Simple evaluation history buffer for (x, z) pairs.
 
-    Stores all evaluations, including duplicates, to mirror upstream behavior.
+    Stores all evaluations, including duplicates, to preserve evaluation order.
     """
     Xn: np.ndarray = field(default_factory=lambda: np.empty((0, 0)))
     Zn: np.ndarray = field(default_factory=lambda: np.empty((0,)))
@@ -20,10 +20,6 @@ class HistoryBuffer:
         if self.Xn.size == 0:
             self.Xn = x_row.copy()
             self.Zn = np.atleast_1d(z).copy()
-            return
-        last_x = self.Xn[-1]
-        last_z = self.Zn[-1]
-        if np.array_equal(last_x, x_row[0]) and float(last_z) == float(z):
             return
         self.Xn = np.vstack((self.Xn, x_row))
         self.Zn = np.hstack((self.Zn, z))

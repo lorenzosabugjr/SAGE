@@ -531,7 +531,7 @@ class SAGEOpt(BaseOptim):
 
         # Gradient estimator-relevant quantities
         self.autonoise = autonoise  # Do we need to estimate the noise?
-        self.ns_est = 0.0 if autonoise else noisebnd  # Estimated noise bounds
+        self.ns_est = noisebnd  # Estimated noise bounds
         self.hess_norm = 0.0
         self.hess_lipsc = 0.0
         self.A2 = None

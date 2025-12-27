@@ -79,29 +79,28 @@ class SolverTest:
         elif grad_est_name == "nmxfd":
             self.estimator = NMXFDEstimator(self.obj_func, dims, history=self.history)
         elif grad_est_name == "sage":
-            X_init = np.tile(X0, (dims + 1, 1)) + 1 * np.vstack(
+            X_init = np.tile(X0, (dims + 1, 1)) + np.vstack(
                 (np.zeros((1, dims)), np.identity(dims))
             )
-            # Evaluate these points
             for i in range(1, X_init.shape[0]):
-                z_val = self.problem.eval(X_init[i], self.noise_type, self.noise_param) # Direct call
+                z_val = self.problem.eval(X_init[i], self.noise_type, self.noise_param)  # Direct call
                 self.history.add(X_init[i], z_val)
 
             self.estimator = SAGE(
-                self.obj_func, 
-                dims, 
-                noise_type=self.noise_type, 
+                self.obj_func,
+                dims,
+                noise_type=self.noise_type,
                 noise_param=self.noise_param,
-                autonoise=True,
                 quickmode=True,
+                diam_mode="exact",
                 history=self.history,
-                diam_mode="exact" # Force exact diameter calculation to match upstream
             )
-            
-            # Update X0/Z0 to the best point in history (matching Upstream BaseOptim behavior)
-            best_idx = np.argmin(self.history.Zn)
-            self.X0 = self.history.Xn[best_idx]
-            self.Z0 = self.history.Zn[best_idx]
+
+            # Start from the best point in history to match BaseOptim initialization.
+            Xn_hist, Zn_hist = self.history.snapshot()
+            best_idx = int(np.argmin(Zn_hist))
+            self.X0 = Xn_hist[best_idx].copy()
+            self.Z0 = Zn_hist[best_idx]
             
         else:
             raise ValueError(f"Unknown gradient estimator: {grad_est_name}")
@@ -122,30 +121,14 @@ class SolverTest:
         self.hist_t = []
         self.start_time = datetime.now()
         
-        # Initialize history with starting point
-        # Upstream runner loop starts *after* initialization.
-        # But upstream 'run()' method enters the loop immediately.
-        # The loop condition is 'while self.solver.n < maxevals'.
-        # Inside the loop: eval, add_samples, record z_k.
-        # So the initial z_k is recorded after the FIRST step evaluation?
-        # No, upstream SolverTest init:
-        #   self.hist_z_k = np.empty((0,1))
-        # Then run():
-        #   while ...:
-        #     record z_k
-        # So the first recorded z_k corresponds to the state after the first evaluation in the loop.
-        # The initialization evaluations are NOT recorded in hist_z_k.
-        
-        # In my StandardDescent, 'step()' does multiple evaluations.
-        # My callbacks will record z_k for each of them.
+        # StandardDescent invokes its callback at the start of each step (current z_k)
+        # and after each evaluation (line search or auxiliary sample). We record each
+        # callback so hist_z_k includes the initial z0 plus per-evaluation values.
         
         def record_state(z_val=None):
-            # Record current z_k
-            # If z_val is passed (from solver), use it.
-            # Otherwise use self.solver.z_k
-            
-            # Avoid recording if budget exhausted (handled by StopIteration usually, 
-            # but callback might fire right before exception?)
+            # Record current z_k (or the explicit evaluation value when provided).
+            # Avoid recording if budget exhausted (handled by StopIteration usually,
+            # but callback might fire right before exception).
             if self.history.Zn.size > self.maxevals:
                 return
 

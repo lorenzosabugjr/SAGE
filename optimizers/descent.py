@@ -69,7 +69,24 @@ class StandardDescent:
             self.callback(self.z_k)
 
         # 1. Estimate Gradient
-        self.gdt_est = self.grad_estimator(self.x_k)
+        if hasattr(self.grad_estimator, "next_aux_sample"):
+            self.gdt_est = self.grad_estimator(self.x_k, allow_refinement=False)
+        else:
+            self.gdt_est = self.grad_estimator(self.x_k)
+
+        if hasattr(self.grad_estimator, "next_aux_sample"):
+            x_aux = self.grad_estimator.next_aux_sample(self.x_k)
+            if x_aux is not None:
+                z_aux = self.fun(x_aux)
+                if np.array_equal(x_aux, self.x_k):
+                    self.z_k = z_aux
+                self.grad_estimator.update(x_aux, z_aux)
+                if getattr(self.grad_estimator, "recompute_on_update", False):
+                    if hasattr(self.grad_estimator, "gdt_est"):
+                        self.gdt_est = self.grad_estimator.gdt_est.copy()
+                if self.callback:
+                    self.callback(z_aux)
+                return
         
         # 2. BFGS Update (if enabled and not first step)
         if self.bfgs and self.k > 0:
@@ -110,22 +127,16 @@ class StandardDescent:
                 z_next = self.fun(x_next)
                 
                 # Update estimator history with the new point
+                if np.array_equal(x_next, self.x_k):
+                    self.z_k = z_next
                 self.grad_estimator.update(x_next, z_next)
-                
-                # Check Armijo condition
-                # Note: Legacy SAGE behavior uses norm(g)**2 of the LATEST gradient
-                # But here we check against the gradient used for the step?
-                # Upstream: z_n <= z_k - etaT * eta * norm(gdt_est)**2
-                # gdt_est in upstream is updated AFTER add_samples calls update_gradient.
-                # So it uses the NEW gradient for the condition?
-                # Let's check upstream state_machine.py again carefully.
-                # add_samples -> add_samples_gdtest -> update_gradient -> grad_est (computes NEW g)
-                # THEN state_machine() is called.
-                # state_machine uses self.gdt_est (which is NEW).
-                # So yes, we should re-estimate gradient NOW.
-                
-                # IMPORTANT: Pass allow_refinement=False to prevent auxiliary sampling during line search!
-                self.gdt_est = self.grad_estimator(self.x_k, allow_refinement=False)
+
+                # If the estimator recomputes on update (e.g., SAGE), use its cached gradient.
+                if getattr(self.grad_estimator, "recompute_on_update", False):
+                    if hasattr(self.grad_estimator, "gdt_est"):
+                        self.gdt_est = self.grad_estimator.gdt_est.copy()
+
+                # Check Armijo condition using the current gradient estimate.
                 descent_term = norm(self.gdt_est)**2
                 
                 if z_next <= self.z_k - self.etaT * self.eta * descent_term:
@@ -145,9 +156,12 @@ class StandardDescent:
                         # Reset
                         # Upstream triggers an extra update_gradient() here via add_samples_gdtest(None, None)
                         # This consumes RNG in grad_set_diam. We must match that.
-                        self.grad_estimator(self.x_k, allow_refinement=False, force=True)
+                        if getattr(self.grad_estimator, "recompute_on_update", False):
+                            self.gdt_est = self.grad_estimator(
+                                self.x_k, allow_refinement=False, force=True
+                            )
                         self.eta = self.eta0
-                        # Note: In upstream, it resets eta then computes x_n = x_k - eta * g.
+                        # Note: Reset eta before computing x_n = x_k - eta * g.
                         # Since we loop, we update p_k below and then x_next will be computed with eta0.
                     
                     # Update search direction with NEW gradient

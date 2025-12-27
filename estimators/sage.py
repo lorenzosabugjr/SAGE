@@ -62,6 +62,8 @@ class SAGE(BaseGradientEstimator):
         self.autonoise = autonoise
         self.quickmode = quickmode
         self.callback = callback
+        self.recompute_on_update = True
+        self.center_sample_on_move = True
         if diam_mode is None:
             self.diam_mode = "approx" if quickmode else "exact"
         else:
@@ -80,7 +82,7 @@ class SAGE(BaseGradientEstimator):
         self.gdtset_diath = 0.05   # Current threshold
         
         # If autonoise is True, noise bound is estimated by the LP
-        # But we initialize it to noise_param (if provided) to match upstream behavior
+        # But we initialize it to noise_param (if provided) for consistency
         self.ns_est = noise_param
         
         self.gdt_est = np.zeros(dim)
@@ -94,16 +96,26 @@ class SAGE(BaseGradientEstimator):
         
         self.gdt_est_frc = False
         self.hist_aux_samples = np.empty((0,))
+
+        self._last_update_n = None
+        self._last_update_x = None
+        self._center_sample_pending = False
+        self._last_center_sample_x = None
         
         # Tracking aux samples for the current estimation step
         self.aux_samples_count = 0
         
-        # Perform initial gradient update to match upstream SAGEOpt.__init__ calling add_samples_gdtest
+        # Perform initial gradient update to match SAGEOpt.__init__ calling add_samples_gdtest
         if self.Xn.size > 0:
             best_idx = np.argmin(self.Zn)
-            self.x_current = self.Xn[best_idx]
-            self._grad_est_lp(self.x_current)
-            self._calc_diam()
+            self._recompute_at(self.Xn[best_idx])
+
+    def _recompute_at(self, x: np.ndarray) -> None:
+        self.x_current = x
+        self._grad_est_lp(x)
+        self._calc_diam()
+        self._last_update_n = self.history.Zn.size
+        self._last_update_x = self.x_current.copy()
 
     def _grad_est_lp(self, x: np.ndarray):
         """
@@ -311,22 +323,41 @@ class SAGE(BaseGradientEstimator):
         """
         # Ensure x is in history
         self._sync_history()
+        sample_added = False
         if not np.any(np.all(np.equal(self.Xn, x), axis=1)):
             self._add_sample(x, self.fun(x))
-            # If we just added it, we might want to update estimates if x is to be x_current
-            # But let's follow the logic below.
+            sample_added = True
+            self._sync_history()
 
-        # Logic to reuse estimate if x is x_current and not forced
-        if (not force) and hasattr(self, 'x_current') and self.x_current is not None and np.array_equal(x, self.x_current):
-            # Already calculated at this point via update() or previous call
-            pass
+        history_changed = self._last_update_n is None or self._last_update_n != self.history.Zn.size
+        x_changed = self.x_current is None or not np.array_equal(self.x_current, x)
+        center_pending = (
+            self.center_sample_on_move
+            and x_changed
+            and not allow_refinement
+            and not force
+            and not sample_added
+        )
+        needs_recompute = force or sample_added or history_changed or x_changed
+
+        if center_pending:
+            # Defer recompute until we take a center sample at the new point.
+            self._center_sample_pending = True
+            self.x_current = x
+        elif needs_recompute:
+            self._recompute_at(x)
         else:
             self.x_current = x
-            self._grad_est_lp(x)
-            diam = self._calc_diam() # RNG
+
+        if (
+            not allow_refinement
+            or self._last_update_x is None
+            or not np.array_equal(x, self._last_update_x)
+        ):
+            return self.gdt_est
 
         self.aux_samples_count = 0
-        
+
         while True:
             # 1. Get current diameter (already calculated if we just updated or entered)
             # We assume gdt_est and gd_v are current for self.x_current
@@ -359,8 +390,7 @@ class SAGE(BaseGradientEstimator):
                 self.gdtset_diath = 1.01 * alpha
 
             # Next sample point
-            direction = self.gd_v / norm(self.gd_v)
-            x_new = x + alpha * direction
+            x_new = x + alpha * self.gd_v / norm(self.gd_v)
             
             z_new = self.fun(x_new)
             self.aux_samples_count += 1
@@ -373,17 +403,58 @@ class SAGE(BaseGradientEstimator):
             
         return self.gdt_est
 
+    def next_aux_sample(self, x: np.ndarray) -> Optional[np.ndarray]:
+        """
+        Decide whether to take a single auxiliary sample for gradient refinement.
+
+        Returns:
+            The next auxiliary sample point if refinement is needed, otherwise None.
+        """
+        if self._center_sample_pending:
+            return x
+
+        if self.gd_vm < self.gdtset_diath or self.gdt_est_frc:
+            self.hist_aux_samples = np.hstack((self.hist_aux_samples, self.aux_samples_count))
+            self.aux_samples_count = 0
+            self.gdt_est_frc = False
+            return None
+
+        if self.ns_est <= 1e-9:
+            alpha = 1e-6
+            self.gdtset_diath = self.gdtset_diaid
+        else:
+            aa = 1 / 3 * self.hess_lipsc
+            bb = 1 / 2 * self.hess_norm
+            dd = -2 * self.ns_est
+            rt = np.roots([aa, bb, 0, dd])
+            roots = rt[np.isreal(rt) & (rt.real >= 0)]
+            if len(roots) > 0:
+                alpha = roots.real[0]
+            else:
+                alpha = 1e-6
+            self.gdtset_diath = 1.01 * alpha
+
+        x_new = x + alpha * self.gd_v / norm(self.gd_v)
+        self.aux_samples_count += 1
+        if self.aux_samples_count >= 2.5 * self.dim:
+            self.gdt_est_frc = True
+
+        return x_new
+
     def _add_sample(self, x: np.ndarray, z: float):
         self.history.add(x, z)
 
     def update(self, x: np.ndarray, z: float):
         self._add_sample(x, z)
         self._sync_history()
+        if hasattr(self, "x_current") and self.x_current is not None:
+            if np.array_equal(x, self.x_current):
+                self._center_sample_pending = False
+                self._last_center_sample_x = self.x_current.copy()
         # Update gradient estimate and diameter at the current center point
-        # This matches upstream behavior where every add_samples triggers update_gradient(x_k)
+        # This matches the behavior where every add_samples triggers update_gradient(x_k)
         if hasattr(self, 'x_current') and self.x_current is not None:
-            self._grad_est_lp(self.x_current)
-            self._calc_diam()
+            self._recompute_at(self.x_current)
 
     def _sync_history(self):
         self.Xn, self.Zn = self.history.snapshot()

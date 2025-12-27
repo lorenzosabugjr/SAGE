@@ -126,4 +126,4 @@ The `N_f` samples with smallest `xi` values are used to construct the constraint
 
 ## 7. Implementation note
 
-The reference implementation approximates the diameter and uses local optimization in that step. See `docs/implementation.md` for code-level details.
+The implementation approximates the diameter and uses local optimization in that step. See `docs/implementation.md` for code-level details.
