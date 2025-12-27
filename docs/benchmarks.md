@@ -23,7 +23,7 @@ Defaults in `tests/config.py` (current repo state):
 - Noise parameters: `[1.0, 1e-3]`
 - Noise types: `["gaussian"]`
 - Trials: `BMK_MAXTRIALS = 100`
-- Evaluation budget: `50 * D` (wired in `tests/run_benchmarks.py`)
+- Evaluation budget: `MAX_EVALS_MULT * D` (from `tests/config.py`)
 
 Noise sweeps are driven by `LIST_NOISE_TYPE` and `LIST_NOISE_PARAM` in `tests/config.py`.
 

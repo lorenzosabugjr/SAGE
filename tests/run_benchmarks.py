@@ -9,6 +9,7 @@ from tests.config import (
     LIST_NOISE_PARAM,
     LIST_NOISE_TYPE,
     BMK_MAXTRIALS,
+    MAX_EVALS_MULT,
 )
 from tests.runner import SolverTest
 from utils.noise import NoiseType
@@ -49,7 +50,7 @@ def run_all_benchmarks():
                                     test = SolverTest(
                                         problem_name=bmk_prob,
                                         grad_est_name=bmk_est,
-                                        maxevals=50 * bmk_D,
+                                        maxevals=MAX_EVALS_MULT * bmk_D,
                                         dims=bmk_D,
                                         condnum=bmk_condnum,
                                         randseed=trial_i,
@@ -83,7 +84,7 @@ def run_all_benchmarks():
 
                                     if bmk_est == "sage":
                                         res_auxs = np.hstack(
-                                            (res_auxs, np.mean(test.solver.hist_aux_samples))
+                                            (res_auxs, np.mean(test.estimator.hist_aux_samples))
                                         )
                                     
                                 except Exception as e:

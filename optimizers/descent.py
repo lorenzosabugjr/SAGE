@@ -154,8 +154,7 @@ class StandardDescent:
                         self.eta = self.eta * self.etaM
                     else:
                         # Reset
-                        # Upstream triggers an extra update_gradient() here via add_samples_gdtest(None, None)
-                        # This consumes RNG in grad_set_diam. We must match that.
+                        # Trigger an extra gradient update here; this consumes RNG in grad_set_diam.
                         if getattr(self.grad_estimator, "recompute_on_update", False):
                             self.gdt_est = self.grad_estimator(
                                 self.x_k, allow_refinement=False, force=True
@@ -185,7 +184,13 @@ class StandardDescent:
             
     def run(self, max_evals: int):
         """Run until max evaluations reached (approximate control)."""
-        # Since we don't control the estimator's internal eval count easily here without coupling,
-        # we might rely on the caller to check loop conditions.
-        # But here is a simple loop.
-        pass
+        if max_evals <= 0:
+            return
+
+        history = getattr(self.grad_estimator, "history", None)
+        if history is not None:
+            while history.Zn.size < max_evals:
+                self.step()
+        else:
+            for _ in range(max_evals):
+                self.step()

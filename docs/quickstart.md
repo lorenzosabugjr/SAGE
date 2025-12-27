@@ -10,7 +10,6 @@ Keep in mind that SAGE may call `fun` multiple times per gradient estimate.
 ```python
 import numpy as np
 from estimators import SAGE
-from utils.noise import NoiseType
 
 # 1. Define your black-box function (e.g., a simulation or experiment)
 def my_noisy_func(x):
@@ -18,14 +17,12 @@ def my_noisy_func(x):
 
 # 2. Initialize SAGE
 #    - dim: Dimension of x
-#    - noise_type: GAUSSIAN or UNIFORM
-#    - noise_param: Sigma (std dev) or bound width
+#    - noise_param: initial noise bound (used if autonoise=False)
 #    - autonoise: estimate noise bound in the LP
 #    - quickmode: use a filtered subset of samples
 grad_estimator = SAGE(
     fun=my_noisy_func, 
     dim=5, 
-    noise_type=NoiseType.GAUSSIAN, 
     noise_param=0.01,
     autonoise=True,
     quickmode=True,
@@ -69,10 +66,14 @@ between the objective and the estimator.
 
 ```python
 from scipy.optimize import minimize
-from utils.history import HistoryBuffer, wrap_fun
+from utils.history import HistoryBuffer
 
 history = HistoryBuffer()
-fun_logged = wrap_fun(my_noisy_func, history)
+
+def fun_logged(x):
+    z = my_noisy_func(x)
+    history.add(x, z)
+    return z
 
 grad_estimator = SAGE(
     fun=fun_logged,

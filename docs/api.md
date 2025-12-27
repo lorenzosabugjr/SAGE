@@ -13,26 +13,26 @@ class SAGE(BaseGradientEstimator):
         self,
         fun: Callable[[np.ndarray], float],
         dim: int,
-        noise_type: NoiseType = NoiseType.UNIFORM,
         noise_param: float = 0.0,
         autonoise: bool = True,
         quickmode: bool = True,
         initial_history: Optional[tuple[np.ndarray, np.ndarray]] = None,
         history: Optional[HistoryBuffer] = None,
-        diam_mode: Optional[str] = None
+        diam_mode: Optional[str] = None,
+        callback: Optional[Callable[[], None]] = None
     )
 ```
 
 **Parameters:**
 *   `fun`: The black-box objective function `f: R^n -> R`.
 *   `dim`: Dimensionality of the problem.
-*   `noise_type`: Noise model (`NoiseType.UNIFORM` or `NoiseType.GAUSSIAN`).
-*   `noise_param`: Noise magnitude used only when `autonoise=False`.
+*   `noise_param`: Noise bound used only when `autonoise=False` (or an initial value otherwise).
 *   `autonoise`: If `True`, estimates the noise bound inside the LP (adds an extra decision variable).
 *   `quickmode`: If `True`, uses a filtered subset of samples for faster LP solving.
 *   `initial_history`: Optional tuple `(X, Z)` to seed the history, where `X` is `(N, dim)` and `Z` is `(N,)`.
 *   `history`: Optional shared `HistoryBuffer` used to collect all evaluations (e.g., from line search).
 *   `diam_mode`: `"exact"` or `"approx"`. Defaults to `"approx"` when `quickmode=True`.
+*   `callback`: Optional callback invoked after each auxiliary evaluation.
 
 ---
 
@@ -42,11 +42,15 @@ Standard Finite Difference Estimators (Forward and Central).
 
 ```python
 class FFDEstimator(BaseGradientEstimator):
-    def __init__(self, fun, dim, step=1e-6)
+    def __init__(self, fun, dim, step=1e-6, history=None)
+
+class CFDEstimator(BaseGradientEstimator):
+    def __init__(self, fun, dim, step=1e-6, history=None)
 ```
 
 **Parameters:**
 *   `step`: The finite difference step size $h$.
+*   `history`: Optional shared `HistoryBuffer` to record evaluations.
 
 ---
 
@@ -57,13 +61,14 @@ implementation uses a numerical integration of a Gaussian derivative to mix step
 
 ```python
 class NMXFDEstimator(BaseGradientEstimator):
-    def __init__(self, fun, dim, rangeintegral=(-2, 2), numpoints=4, sigma=1e-2)
+    def __init__(self, fun, dim, rangeintegral=(-2, 2), numpoints=4, sigma=1e-2, history=None)
 ```
 
 **Parameters:**
 *   `rangeintegral`: Tuple `(min, max)` for the integration range (in sigma units).
 *   `numpoints`: Number of integration points.
 *   `sigma`: Width of the Gaussian kernel.
+*   `history`: Optional shared `HistoryBuffer` to record evaluations.
 
 ---
 
@@ -73,16 +78,17 @@ Randomized Gaussian Smoothing Estimators.
 
 ```python
 class GSGEstimator(BaseGradientEstimator):
-    def __init__(self, fun, dim, m, u=1e-6, seed=None)
+    def __init__(self, fun, dim, m, u=1e-6, seed=None, history=None)
 
 class cGSGEstimator(BaseGradientEstimator):
-    def __init__(self, fun, dim, m, u=1e-6, seed=None)
+    def __init__(self, fun, dim, m, u=1e-6, seed=None, history=None)
 ```
 
 **Parameters:**
 *   `m`: Number of random directions to sample.
 *   `u`: Smoothing radius.
 *   `seed`: Random seed for reproducibility.
+*   `history`: Optional shared `HistoryBuffer` to record evaluations.
 
 ---
 
@@ -102,6 +108,8 @@ class StandardDescent:
         stepsize: float = 1.0,
         stepsizemode: StepSizeMode = StepSizeMode.ADAPTIVE,
         bfgs: bool = False,
+        z0: Optional[float] = None,
+        callback: Optional[Callable[[float], None]] = None,
     )
 ```
 
@@ -109,6 +117,8 @@ class StandardDescent:
 *   `grad_estimator`: An instance of a SAGE or FD estimator.
 *   `bfgs`: If `True`, approximates the Hessian inverse using BFGS updates.
 *   `stepsizemode`: `StepSizeMode.FIXED` or `StepSizeMode.ADAPTIVE` (Armijo backtracking).
+*   `z0`: Optional initial function value at `x0` (avoids re-evaluation).
+*   `callback`: Optional callback invoked with each recorded evaluation value.
 
 ---
 
@@ -119,7 +129,7 @@ class StandardDescent:
 Enum for defining the noise model.
 
 *   `NoiseType.UNIFORM`: Assumes bounded noise within `[-delta/2, delta/2]`.
-*   `NoiseType.GAUSSIAN`: Assumes Gaussian noise; the constraint bound is `3*sigma` (see `utils/noise.py`).
+*   `NoiseType.GAUSSIAN`: Gaussian noise with standard deviation `param`.
 
 ### `HistoryBuffer`
 

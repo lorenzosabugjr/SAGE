@@ -23,23 +23,3 @@ def add_noise(value: float, noise_type: NoiseType, param: float) -> float:
         return value + np.random.normal(0, param)
     else:
         raise ValueError(f"Unknown noise type: {noise_type}")
-
-def get_constraint_bound(noise_type: NoiseType, param: float) -> float:
-    """
-    Returns the hard bound used for constraints (e.g. in SAGE LP).
-    
-    Args:
-        noise_type: The type of noise.
-        param: The noise parameter.
-    
-    Returns:
-        float: The effective bound.
-               For UNIFORM, returns param.
-               For GAUSSIAN, returns 3 * param (3-sigma rule).
-    """
-    if noise_type == NoiseType.UNIFORM:
-        return param
-    elif noise_type == NoiseType.GAUSSIAN:
-        return 3.0 * param
-    else:
-        raise ValueError(f"Unknown noise type: {noise_type}")

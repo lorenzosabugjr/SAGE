@@ -53,14 +53,14 @@ class SolverTest:
         # 2. Initial Point Logic
         np.random.seed(randseed)
         X0 = 1e2 * (np.random.rand(dims) - 0.5)
-        # Upstream uses 0.0 noise for the check loop
+        # Use 0.0 noise for the check loop
         Z0_tmp = self.problem.eval(X0, self.noise_type, 0.0) 
         while Z0_tmp <= 10 * max(1e-9, noise_param):
             X0 = 1e2 * (np.random.rand(dims) - 0.5)
             Z0_tmp = self.problem.eval(X0, self.noise_type, 0.0)
 
         self.X0 = X0
-        # Upstream evaluates initial point with actual noise for the history
+        # Evaluate the initial point with actual noise for the history
         self.Z0 = self.problem.eval(self.X0, self.noise_type, self.noise_param)
         
         # Shared History Buffer
@@ -89,14 +89,13 @@ class SolverTest:
             self.estimator = SAGE(
                 self.obj_func,
                 dims,
-                noise_type=self.noise_type,
                 noise_param=self.noise_param,
                 quickmode=True,
                 diam_mode="exact",
                 history=self.history,
             )
 
-            # Start from the best point in history to match BaseOptim initialization.
+            # Start from the best point in history to match the estimator's initialization.
             Xn_hist, Zn_hist = self.history.snapshot()
             best_idx = int(np.argmin(Zn_hist))
             self.X0 = Xn_hist[best_idx].copy()

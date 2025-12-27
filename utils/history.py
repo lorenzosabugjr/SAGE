@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import numpy as np
-from typing import Callable, Optional, Tuple
+from typing import Optional, Tuple
 
 
 @dataclass
@@ -45,14 +45,3 @@ class HistoryBuffer:
     def snapshot(self) -> Tuple[np.ndarray, np.ndarray]:
         return self.Xn, self.Zn
 
-
-def wrap_fun(fun: Callable[[np.ndarray], float], history: HistoryBuffer) -> Callable[[np.ndarray], float]:
-    """
-    Wraps a function so every evaluation is recorded in history.
-    """
-    def wrapped(x: np.ndarray) -> float:
-        z = fun(x)
-        history.add(x, z)
-        return z
-
-    return wrapped

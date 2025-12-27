@@ -48,7 +48,8 @@ Each pair `(xi, xj)` yields a **slab** of admissible gradients. The intersection
 
 - **Stateful:** SAGE aggregates the full history of evaluations `(x_k, f(x_k))`. You can pass `initial_history` to seed it.
 - **Extra evaluations:** SAGE may call `fun` multiple times per gradient estimate to refine the set, so track evaluation budgets accordingly.
-- **Noise handling:** when `noise_type=GAUSSIAN`, the code uses a `3*sigma` bound in constraints (see `utils/noise.py`).
+- **Noise handling:** with `autonoise=True` (default), SAGE estimates the bound internally. Set
+  `autonoise=False` to use `noise_param` directly.
 
 ## Installation
 
@@ -61,7 +62,6 @@ pip install -r requirements.txt
 ```python
 import numpy as np
 from estimators import SAGE
-from utils.noise import NoiseType
 
 def black_box(x):
     return np.sum(x**2) + np.random.normal(0, 0.01)
@@ -69,7 +69,6 @@ def black_box(x):
 estimator = SAGE(
     fun=black_box,
     dim=10,
-    noise_type=NoiseType.GAUSSIAN,
     noise_param=1e-2,
     autonoise=True,
     quickmode=True,

@@ -4,7 +4,6 @@ from numpy.linalg import norm
 from typing import Callable, Optional
 from .base import BaseGradientEstimator
 from utils.history import HistoryBuffer
-from utils.noise import NoiseType
 
 class SAGE(BaseGradientEstimator):
     """
@@ -20,8 +19,6 @@ class SAGE(BaseGradientEstimator):
     Attributes:
         fun (Callable): The black-box objective function f(x).
         dim (int): Dimensionality of the input space.
-        noise_type (NoiseType): Assumed noise model (UNIFORM or GAUSSIAN).
-        noise_param (float): Noise magnitude (bound width for UNIFORM, std dev for GAUSSIAN).
         autonoise (bool): If True, attempts to estimate noise level alongside gradient.
         quickmode (bool): If True, uses a local subset of samples for faster LP solving.
         Xn (np.ndarray): History of evaluated points (N x dim).
@@ -32,7 +29,6 @@ class SAGE(BaseGradientEstimator):
         self,
         fun: Callable[[np.ndarray], float],
         dim: int,
-        noise_type: NoiseType = NoiseType.UNIFORM,
         noise_param: float = 0.0,
         autonoise: bool = True,
         quickmode: bool = True,
@@ -47,8 +43,7 @@ class SAGE(BaseGradientEstimator):
         Args:
             fun: The objective function to estimate gradients for.
             dim: The dimension of the input vector x.
-            noise_type: The type of noise present in evaluations (UNIFORM or GAUSSIAN).
-            noise_param: The parameter characterizing the noise (delta or sigma).
+            noise_param: Noise bound used when autonoise is False (or an initial value otherwise).
             autonoise: Whether to automatically estimate the noise bound.
             quickmode: Whether to use a subset of neighbors for faster computation.
             initial_history: Optional tuple (X, Z) of past evaluations to seed the history.
@@ -57,8 +52,6 @@ class SAGE(BaseGradientEstimator):
             callback: Optional callback invoked after each auxiliary evaluation.
         """
         super().__init__(fun, dim, history=history)
-        self.noise_type = noise_type
-        self.noise_param = noise_param
         self.autonoise = autonoise
         self.quickmode = quickmode
         self.callback = callback
@@ -100,12 +93,11 @@ class SAGE(BaseGradientEstimator):
         self._last_update_n = None
         self._last_update_x = None
         self._center_sample_pending = False
-        self._last_center_sample_x = None
         
         # Tracking aux samples for the current estimation step
         self.aux_samples_count = 0
         
-        # Perform initial gradient update to match SAGEOpt.__init__ calling add_samples_gdtest
+        # Perform initial gradient update when history is pre-seeded
         if self.Xn.size > 0:
             best_idx = np.argmin(self.Zn)
             self._recompute_at(self.Xn[best_idx])
@@ -450,7 +442,6 @@ class SAGE(BaseGradientEstimator):
         if hasattr(self, "x_current") and self.x_current is not None:
             if np.array_equal(x, self.x_current):
                 self._center_sample_pending = False
-                self._last_center_sample_x = self.x_current.copy()
         # Update gradient estimate and diameter at the current center point
         # This matches the behavior where every add_samples triggers update_gradient(x_k)
         if hasattr(self, 'x_current') and self.x_current is not None:

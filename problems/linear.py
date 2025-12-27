@@ -1,5 +1,4 @@
 import numpy as np
-from sklearn.datasets import load_diabetes
 from .base import BaseProblem
 
 class LeastSquares(BaseProblem):
@@ -40,17 +39,3 @@ class Lasso(BaseProblem):
     def _eval_deterministic(self, x: np.ndarray) -> float:
         q = self.b - self.A@x
         return 0.5*q.T.dot(q) + abs(x).sum()
-
-class DiabetesRegression(BaseProblem):
-    def __init__(self):
-        super().__init__()
-        # Load dataset (diabetes)
-        self.X, self.y = load_diabetes(return_X_y=True, as_frame=False)
-
-        self.x_opt = np.linalg.pinv(self.X)@self.y
-        q = self.y - self.X@self.x_opt
-        self.z_opt = 1//self.y.shape[0] * q.T.dot(q)
-    
-    def _eval_deterministic(self, x: np.ndarray) -> float:
-        q = self.y - self.X@x
-        return 1/self.y.shape[0] * q.T.dot(q) - self.z_opt
