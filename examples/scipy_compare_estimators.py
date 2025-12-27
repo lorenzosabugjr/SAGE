@@ -70,8 +70,6 @@ def main():
             lambda fun: SAGE(
                 fun=fun,
                 dim=dim,
-                noise_param=noise_sigma,
-                autonoise=True,
                 quickmode=True,
             ),
         ),

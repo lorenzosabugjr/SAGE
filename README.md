@@ -48,8 +48,7 @@ Each pair `(xi, xj)` yields a **slab** of admissible gradients. The intersection
 
 - **Stateful:** SAGE aggregates the full history of evaluations `(x_k, f(x_k))`. You can pass `initial_history` to seed it, or let SAGE auto-seed a simplex around the first query with `init_step` (default `1e-3`).
 - **Extra evaluations:** SAGE may call `fun` multiple times per gradient estimate to refine the set, so track evaluation budgets accordingly.
-- **Noise handling:** with `autonoise=True` (default), SAGE estimates the bound internally. Set
-  `autonoise=False` to use `noise_param` directly.
+- **Noise handling:** SAGE estimates the noise bound internally; you only need to define the noisy objective.
 
 ## Installation
 
@@ -69,8 +68,6 @@ def black_box(x):
 estimator = SAGE(
     fun=black_box,
     dim=10,
-    noise_param=1e-2,
-    autonoise=True,
     quickmode=True,
 )
 

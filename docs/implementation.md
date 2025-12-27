@@ -19,14 +19,8 @@ This document ties the theory in the paper (https://arxiv.org/abs/2508.19400) to
 
 ## 2. LP construction
 
-For each neighbor `x^(j)`, the code builds two inequality rows (slab constraints):
-
-```
-[-u_ij, -0.5*mu_ij, -1/6*mu_ij^2] * [g, H_i, gamma_H]^T <= -g~_ij
-[ u_ij, -0.5*mu_ij, -1/6*mu_ij^2] * [g, H_i, gamma_H]^T <=  g~_ij
-```
-
-If `autonoise=True`, a fourth term `-2/mu_ij` is appended for `eps`:
+For each neighbor `x^(j)`, the code builds two inequality rows (slab constraints)
+including the noise term `eps`:
 
 ```
 [-u_ij, -0.5*mu_ij, -1/6*mu_ij^2, -2/mu_ij] * [g, H_i, gamma_H, eps]^T <= -g~_ij
@@ -36,13 +30,13 @@ If `autonoise=True`, a fourth term `-2/mu_ij` is appended for `eps`:
 Non-negativity is enforced via extra rows:
 
 ```
-H_i >= 0, gamma_H >= 0, (and eps >= 0 if autonoise)
+H_i >= 0, gamma_H >= 0, eps >= 0
 ```
 
 The LP objective matches the theory:
 
 ```
-min H_i + gamma_H (+ eps)
+min H_i + gamma_H + eps
 ```
 
 The code uses `scipy.optimize.linprog` to solve the LP.

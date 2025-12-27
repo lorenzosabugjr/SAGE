@@ -13,8 +13,6 @@ class SAGE(BaseGradientEstimator):
         self,
         fun: Callable[[np.ndarray], float],
         dim: int,
-        noise_param: float = 0.0,
-        autonoise: bool = True,
         quickmode: bool = True,
         initial_history: Optional[tuple[np.ndarray, np.ndarray]] = None,
         history: Optional[HistoryBuffer] = None,
@@ -27,8 +25,6 @@ class SAGE(BaseGradientEstimator):
 **Parameters:**
 *   `fun`: The black-box objective function `f: R^n -> R`.
 *   `dim`: Dimensionality of the problem.
-*   `noise_param`: Noise bound used only when `autonoise=False` (or an initial value otherwise).
-*   `autonoise`: If `True`, estimates the noise bound inside the LP (adds an extra decision variable).
 *   `quickmode`: If `True`, uses a filtered subset of samples for faster LP solving.
 *   `initial_history`: Optional tuple `(X, Z)` to seed the history, where `X` is `(N, dim)` and `Z` is `(N,)`.
 *   `history`: Optional shared `HistoryBuffer` used to collect all evaluations (e.g., from line search).
@@ -36,6 +32,7 @@ class SAGE(BaseGradientEstimator):
 *   `callback`: Optional callback invoked after each auxiliary evaluation.
 *   `init_step`: Step size for the initial simplex when history is empty.
 
+SAGE estimates the noise bound internally.
 If history is empty on the first call, SAGE evaluates `x0` and `x0 + init_step * e_i` to seed the history.
 
 ---

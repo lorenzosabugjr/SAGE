@@ -89,7 +89,6 @@ class SolverTest:
             self.estimator = SAGE(
                 self.obj_func,
                 dims,
-                noise_param=self.noise_param,
                 quickmode=True,
                 diam_mode="exact",
                 history=self.history,

@@ -6,7 +6,7 @@ This guide demonstrates how to integrate SAGE into your optimization pipelines. 
 
 If you have a noisy black-box function `my_noisy_func(x)`, you can replace your gradient estimator with SAGE directly.
 Keep in mind that SAGE may call `fun` multiple times per gradient estimate.
-If the history is empty on the first call, SAGE seeds a simplex around the first query using `init_step` (default `1e-3`).
+SAGE estimates the noise bound internally. If the history is empty on the first call, SAGE seeds a simplex around the first query using `init_step` (default `1e-3`).
 
 ```python
 import numpy as np
@@ -18,15 +18,11 @@ def my_noisy_func(x):
 
 # 2. Initialize SAGE
 #    - dim: Dimension of x
-#    - noise_param: initial noise bound (used if autonoise=False)
-#    - autonoise: estimate noise bound in the LP
 #    - quickmode: use a filtered subset of samples
 #    - init_step: step size for the auto-initial simplex when history is empty
 grad_estimator = SAGE(
     fun=my_noisy_func, 
     dim=5, 
-    noise_param=0.01,
-    autonoise=True,
     quickmode=True,
     init_step=1e-3,
     # diam_mode defaults to "approx" when quickmode=True

@@ -24,8 +24,6 @@ x0 = rng.normal(size=dim)
 grad = SAGE(
     fun=noisy_rosenbrock,
     dim=dim,
-    noise_param=1e-2,
-    autonoise=True,
     quickmode=True,
 )
 

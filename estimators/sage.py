@@ -19,7 +19,6 @@ class SAGE(BaseGradientEstimator):
     Attributes:
         fun (Callable): The black-box objective function f(x).
         dim (int): Dimensionality of the input space.
-        autonoise (bool): If True, attempts to estimate noise level alongside gradient.
         quickmode (bool): If True, uses a local subset of samples for faster LP solving.
         Xn (np.ndarray): History of evaluated points (N x dim).
         Zn (np.ndarray): History of function values (N,).
@@ -29,8 +28,6 @@ class SAGE(BaseGradientEstimator):
         self,
         fun: Callable[[np.ndarray], float],
         dim: int,
-        noise_param: float = 0.0,
-        autonoise: bool = True,
         quickmode: bool = True,
         initial_history: Optional[tuple[np.ndarray, np.ndarray]] = None,
         history: Optional[HistoryBuffer] = None,
@@ -44,8 +41,6 @@ class SAGE(BaseGradientEstimator):
         Args:
             fun: The objective function to estimate gradients for.
             dim: The dimension of the input vector x.
-            noise_param: Noise bound used when autonoise is False (or an initial value otherwise).
-            autonoise: Whether to automatically estimate the noise bound.
             quickmode: Whether to use a subset of neighbors for faster computation.
             initial_history: Optional tuple (X, Z) of past evaluations to seed the history.
             history: Optional shared HistoryBuffer used to collect evaluations.
@@ -54,7 +49,6 @@ class SAGE(BaseGradientEstimator):
             init_step: Step size used to seed an initial simplex when history is empty.
         """
         super().__init__(fun, dim, history=history)
-        self.autonoise = autonoise
         self.quickmode = quickmode
         self.callback = callback
         self.init_step = init_step
@@ -77,9 +71,8 @@ class SAGE(BaseGradientEstimator):
         self.gdtset_diaid = 0.05   # Ideal gradient set diameter
         self.gdtset_diath = 0.05   # Current threshold
         
-        # If autonoise is True, noise bound is estimated by the LP
-        # But we initialize it to noise_param (if provided) for consistency
-        self.ns_est = noise_param
+        # Noise bound is estimated by the LP; initialize to zero.
+        self.ns_est = 0.0
         
         self.gdt_est = np.zeros(dim)
         self.hess_norm = 0.0
@@ -163,7 +156,7 @@ class SAGE(BaseGradientEstimator):
             coll_idx = [j for j in range(self.Zn.size) if j not in x_idx]
 
         # 3. Build LP Matrices
-        A = np.empty([0, D + 2 + 1 * self.autonoise])
+        A = np.empty([0, D + 3])
         b = np.empty([0, 1])
         
         z_curr = self.Zn[x_idx[0]]
@@ -174,51 +167,27 @@ class SAGE(BaseGradientEstimator):
             uij = (self.Xn[j] - x) / dij
             gij = (self.Zn[j] - z_curr) / dij
             
-            # Constraints
-            if not self.autonoise:
-                # Cols: [g (D), L (1), M (1)]
-                row1 = np.hstack((-uij, -0.5 * dij, -1 / 6 * dij**2))
-                row2 = np.hstack((uij, -0.5 * dij, -1 / 6 * dij**2))
-                A = np.vstack((A, row1, row2))
-            else:
-                # Cols: [g (D), L (1), M (1), e (1)]
-                row1 = np.hstack((-uij, -0.5 * dij, -1 / 6 * dij**2, -2 / dij))
-                row2 = np.hstack((uij, -0.5 * dij, -1 / 6 * dij**2, -2 / dij))
-                A = np.vstack((A, row1, row2))
+            # Cols: [g (D), L (1), M (1), e (1)]
+            row1 = np.hstack((-uij, -0.5 * dij, -1 / 6 * dij**2, -2 / dij))
+            row2 = np.hstack((uij, -0.5 * dij, -1 / 6 * dij**2, -2 / dij))
+            A = np.vstack((A, row1, row2))
                 
             b = np.vstack((b, -gij, gij))
 
         # 4. Solve LP
-        if not self.autonoise:
-            # Bounds for L and M are >= 0. g is unbounded.
-            # A_ub * [g, L, M]^T <= b_ub
-            # We want to minimize nothing? Or just find feasible point?
-            # Original used linprog with obj [0...0, 1, 1] to minimize L+M?
-            Ae = np.vstack((A, np.hstack((np.zeros(A.shape[1] - 2), -1, 0))))
-            Ae = np.vstack((Ae, np.hstack((np.zeros(A.shape[1] - 2), 0, -1))))
-            be = np.vstack((b, 0, 0)).flatten()
-            
-            c = np.hstack((np.zeros(Ae.shape[1] - 2), 1, 1))
-            res = cp.optimize.linprog(c, A_ub=Ae, b_ub=be, bounds=(None, None), method="highs-ipm")
-            
-            if res.success:
-                self.gdt_est = res.x[:-2]
-                self.hess_norm = res.x[-2]
-                self.hess_lipsc = np.max([res.x[-1], self.hess_lipsc])
-        else:
-            Ae = np.vstack((A, np.hstack((np.zeros(A.shape[1] - 3), -1, 0, 0))))
-            Ae = np.vstack((Ae, np.hstack((np.zeros(A.shape[1] - 3), 0, -1, 0))))
-            Ae = np.vstack((Ae, np.hstack((np.zeros(A.shape[1] - 3), 0, 0, -1))))
-            be = np.vstack((b, 0, 0, 0)).flatten()
-            
-            c = np.hstack((np.zeros(Ae.shape[1] - 3), 1, 1, 1))
-            res = cp.optimize.linprog(c, A_ub=Ae, b_ub=be, bounds=(None, None))
-            
-            if res.success:
-                self.gdt_est = res.x[:-3]
-                self.hess_norm = res.x[-3]
-                self.hess_lipsc = np.max([res.x[-2], self.hess_lipsc])
-                self.ns_est = res.x[-1]
+        Ae = np.vstack((A, np.hstack((np.zeros(A.shape[1] - 3), -1, 0, 0))))
+        Ae = np.vstack((Ae, np.hstack((np.zeros(A.shape[1] - 3), 0, -1, 0))))
+        Ae = np.vstack((Ae, np.hstack((np.zeros(A.shape[1] - 3), 0, 0, -1))))
+        be = np.vstack((b, 0, 0, 0)).flatten()
+        
+        c = np.hstack((np.zeros(Ae.shape[1] - 3), 1, 1, 1))
+        res = cp.optimize.linprog(c, A_ub=Ae, b_ub=be, bounds=(None, None))
+        
+        if res.success:
+            self.gdt_est = res.x[:-3]
+            self.hess_norm = res.x[-3]
+            self.hess_lipsc = np.max([res.x[-2], self.hess_lipsc])
+            self.ns_est = res.x[-1]
 
         # 5. Construct Gradient Set Polytopes (A2, b2)
         # Used for diameter calculation
@@ -229,10 +198,7 @@ class SAGE(BaseGradientEstimator):
             np.hstack((np.zeros(self.Al.shape), self.Al))
         ))
         
-        if not self.autonoise:
-            params = np.array([self.hess_norm, self.hess_lipsc])
-        else:
-            params = np.array([self.hess_norm, self.hess_lipsc, self.ns_est])
+        params = np.array([self.hess_norm, self.hess_lipsc, self.ns_est])
             
         self.bl = b.flatten() - (Ar @ params)
         self.b2 = np.vstack((self.bl, self.bl)).flatten()
