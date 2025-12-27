@@ -46,7 +46,7 @@ Each pair `(xi, xj)` yields a **slab** of admissible gradients. The intersection
 
 ## Practical Notes
 
-- **Stateful:** SAGE aggregates the full history of evaluations `(x_k, f(x_k))`. You can pass `initial_history` to seed it.
+- **Stateful:** SAGE aggregates the full history of evaluations `(x_k, f(x_k))`. You can pass `initial_history` to seed it, or let SAGE auto-seed a simplex around the first query with `init_step` (default `1e-3`).
 - **Extra evaluations:** SAGE may call `fun` multiple times per gradient estimate to refine the set, so track evaluation budgets accordingly.
 - **Noise handling:** with `autonoise=True` (default), SAGE estimates the bound internally. Set
   `autonoise=False` to use `noise_param` directly.
@@ -85,6 +85,7 @@ grad = estimator(x)
 - [Implementation Notes](docs/implementation.md)
 - [Benchmarks](docs/benchmarks.md)
 - [API Reference](docs/api.md)
+- [Examples](examples/README.md)
 
 ## References
 

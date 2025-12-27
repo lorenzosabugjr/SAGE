@@ -69,24 +69,7 @@ class StandardDescent:
             self.callback(self.z_k)
 
         # 1. Estimate Gradient
-        if hasattr(self.grad_estimator, "next_aux_sample"):
-            self.gdt_est = self.grad_estimator(self.x_k, allow_refinement=False)
-        else:
-            self.gdt_est = self.grad_estimator(self.x_k)
-
-        if hasattr(self.grad_estimator, "next_aux_sample"):
-            x_aux = self.grad_estimator.next_aux_sample(self.x_k)
-            if x_aux is not None:
-                z_aux = self.fun(x_aux)
-                if np.array_equal(x_aux, self.x_k):
-                    self.z_k = z_aux
-                self.grad_estimator.update(x_aux, z_aux)
-                if getattr(self.grad_estimator, "recompute_on_update", False):
-                    if hasattr(self.grad_estimator, "gdt_est"):
-                        self.gdt_est = self.grad_estimator.gdt_est.copy()
-                if self.callback:
-                    self.callback(z_aux)
-                return
+        self.gdt_est = self.grad_estimator(self.x_k)
         
         # 2. BFGS Update (if enabled and not first step)
         if self.bfgs and self.k > 0:
@@ -156,9 +139,7 @@ class StandardDescent:
                         # Reset
                         # Trigger an extra gradient update here; this consumes RNG in grad_set_diam.
                         if getattr(self.grad_estimator, "recompute_on_update", False):
-                            self.gdt_est = self.grad_estimator(
-                                self.x_k, allow_refinement=False, force=True
-                            )
+                            self.gdt_est = self.grad_estimator(self.x_k, force=True)
                         self.eta = self.eta0
                         # Note: Reset eta before computing x_n = x_k - eta * g.
                         # Since we loop, we update p_k below and then x_next will be computed with eta0.

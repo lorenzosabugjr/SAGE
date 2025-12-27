@@ -3,4 +3,5 @@ optimizers/__pycache__/*
 problems/__pycache__/*
 tests/__pycache__/*
 utils/__pycache__/*
+examples/__pycache__/*
 results/*

@@ -36,6 +36,7 @@ class SAGE(BaseGradientEstimator):
         history: Optional[HistoryBuffer] = None,
         diam_mode: Optional[str] = None,
         callback: Optional[Callable[[], None]] = None,
+        init_step: float = 1e-3,
     ):
         """
         Initialize the SAGE estimator.
@@ -50,11 +51,13 @@ class SAGE(BaseGradientEstimator):
             history: Optional shared HistoryBuffer used to collect evaluations.
             diam_mode: "exact" or "approx". Defaults to "approx" when quickmode is True.
             callback: Optional callback invoked after each auxiliary evaluation.
+            init_step: Step size used to seed an initial simplex when history is empty.
         """
         super().__init__(fun, dim, history=history)
         self.autonoise = autonoise
         self.quickmode = quickmode
         self.callback = callback
+        self.init_step = init_step
         self.recompute_on_update = True
         self.center_sample_on_move = True
         if diam_mode is None:
@@ -93,6 +96,7 @@ class SAGE(BaseGradientEstimator):
         self._last_update_n = None
         self._last_update_x = None
         self._center_sample_pending = False
+        self.x_current = None
         
         # Tracking aux samples for the current estimation step
         self.aux_samples_count = 0
@@ -309,13 +313,22 @@ class SAGE(BaseGradientEstimator):
         self.gd_vm = np.linalg.norm(self.gd_v)
         return self.gd_vm
 
-    def __call__(self, x: np.ndarray, allow_refinement: bool = True, force: bool = False) -> np.ndarray:
+    def __call__(self, x: np.ndarray, force: bool = False) -> np.ndarray:
         """
         Estimate the gradient at point x.
         """
         # Ensure x is in history
         self._sync_history()
         sample_added = False
+        if self.Xn.size == 0:
+            x0 = np.asarray(x)
+            self._add_sample(x0, self.fun(x0))
+            for i in range(self.dim):
+                x_step = x0.copy()
+                x_step[i] += self.init_step
+                self._add_sample(x_step, self.fun(x_step))
+            self._sync_history()
+            sample_added = True
         if not np.any(np.all(np.equal(self.Xn, x), axis=1)):
             self._add_sample(x, self.fun(x))
             sample_added = True
@@ -323,29 +336,14 @@ class SAGE(BaseGradientEstimator):
 
         history_changed = self._last_update_n is None or self._last_update_n != self.history.Zn.size
         x_changed = self.x_current is None or not np.array_equal(self.x_current, x)
-        center_pending = (
-            self.center_sample_on_move
-            and x_changed
-            and not allow_refinement
-            and not force
-            and not sample_added
-        )
         needs_recompute = force or sample_added or history_changed or x_changed
 
-        if center_pending:
-            # Defer recompute until we take a center sample at the new point.
-            self._center_sample_pending = True
-            self.x_current = x
-        elif needs_recompute:
+        if needs_recompute:
             self._recompute_at(x)
         else:
             self.x_current = x
 
-        if (
-            not allow_refinement
-            or self._last_update_x is None
-            or not np.array_equal(x, self._last_update_x)
-        ):
+        if self._last_update_x is None or not np.array_equal(x, self._last_update_x):
             return self.gdt_est
 
         self.aux_samples_count = 0
@@ -354,9 +352,6 @@ class SAGE(BaseGradientEstimator):
             # 1. Get current diameter (already calculated if we just updated or entered)
             # We assume gdt_est and gd_v are current for self.x_current
             diam = self.gd_vm 
-            
-            if not allow_refinement:
-                break
             
             # 2. Check Termination Conditions
             if diam < self.gdtset_diath or self.gdt_est_frc or (self.aux_samples_count >= 2.5 * self.dim):

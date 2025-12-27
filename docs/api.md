@@ -19,7 +19,8 @@ class SAGE(BaseGradientEstimator):
         initial_history: Optional[tuple[np.ndarray, np.ndarray]] = None,
         history: Optional[HistoryBuffer] = None,
         diam_mode: Optional[str] = None,
-        callback: Optional[Callable[[], None]] = None
+        callback: Optional[Callable[[], None]] = None,
+        init_step: float = 1e-3,
     )
 ```
 
@@ -33,6 +34,9 @@ class SAGE(BaseGradientEstimator):
 *   `history`: Optional shared `HistoryBuffer` used to collect all evaluations (e.g., from line search).
 *   `diam_mode`: `"exact"` or `"approx"`. Defaults to `"approx"` when `quickmode=True`.
 *   `callback`: Optional callback invoked after each auxiliary evaluation.
+*   `init_step`: Step size for the initial simplex when history is empty.
+
+If history is empty on the first call, SAGE evaluates `x0` and `x0 + init_step * e_i` to seed the history.
 
 ---
 
