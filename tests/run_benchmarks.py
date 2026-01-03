@@ -35,8 +35,10 @@ def run_all_benchmarks():
                         for bmk_noise in LIST_NOISE_PARAM:
                             res_vec = np.empty(0)
                             res_auxs = np.empty(0)
-                            Z0_vec = np.empty(0)
-                            res_hist = None
+                            Z0_eval_vec = np.empty(0)
+                            Z0_true_vec = np.empty(0)
+                            res_hist_eval = None
+                            res_hist_true = None
                             time_hist = None
                         
                             # Loop trials
@@ -58,11 +60,12 @@ def run_all_benchmarks():
                                         noise_param=bmk_noise,
                                     )
                                     
-                                    h_zk, h_t, z0, _ = test.run()
+                                    h_zk_eval, h_zk_true, h_t, z0_eval, z0_true, _ = test.run()
                                     
                                     # Aggregate results
-                                    if res_hist is None:
-                                        res_hist = h_zk
+                                    if res_hist_eval is None:
+                                        res_hist_eval = h_zk_eval
+                                        res_hist_true = h_zk_true
                                         time_hist = h_t
                                     else:
                                         # Handle different lengths if any (should cover maxevals roughly)
@@ -71,16 +74,18 @@ def run_all_benchmarks():
                                         # For now assume mostly consistent or take min?
                                         # Original code used np.hstack.
                                         # Let's trust it aligns or use list.
-                                        if h_zk.shape[0] == res_hist.shape[0]:
-                                            res_hist = np.hstack((res_hist, h_zk))
+                                        if h_zk_eval.shape[0] == res_hist_eval.shape[0]:
+                                            res_hist_eval = np.hstack((res_hist_eval, h_zk_eval))
+                                            res_hist_true = np.hstack((res_hist_true, h_zk_true))
                                             time_hist = np.hstack((time_hist, h_t))
                                         else:
                                             # Mismatch length handling?
                                             # Just skip or truncate?
                                             pass 
 
-                                    Z0_vec = np.hstack((Z0_vec, z0))
-                                    res_vec = np.hstack((res_vec, h_zk[-1] if len(h_zk) > 0 else z0))
+                                    Z0_eval_vec = np.hstack((Z0_eval_vec, z0_eval))
+                                    Z0_true_vec = np.hstack((Z0_true_vec, z0_true))
+                                    res_vec = np.hstack((res_vec, h_zk_eval[-1] if len(h_zk_eval) > 0 else z0_eval))
 
                                     if bmk_est == "sage":
                                         res_auxs = np.hstack(
@@ -92,8 +97,8 @@ def run_all_benchmarks():
                                     continue
 
                             # Report
-                            if len(Z0_vec) > 0:
-                                avg_z0 = np.mean(Z0_vec)
+                            if len(Z0_eval_vec) > 0:
+                                avg_z0 = np.mean(Z0_eval_vec)
                                 avg_res = np.mean(res_vec)
                                 std_res = np.std(res_vec)
                                 avg_time = np.mean(np.sum(time_hist, axis=0)) if time_hist is not None else 0.0
@@ -108,10 +113,12 @@ def run_all_benchmarks():
                                     f"{bmk_noise_type}-{bmk_noise:.6f}.mat"
                                 )
                                 save_dict = {
-                                    "res_hist": res_hist,
+                                    "res_hist_eval": res_hist_eval,
+                                    "res_hist_true": res_hist_true,
                                     "res_vec": res_vec,
                                     "time_hist": time_hist,
-                                    "Z0_vec": Z0_vec,
+                                    "Z0_eval_vec": Z0_eval_vec,
+                                    "Z0_true_vec": Z0_true_vec,
                                 }
                                 if bmk_est == "sage":
                                     save_dict["auxs_hist"] = res_auxs

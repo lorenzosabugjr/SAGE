@@ -61,11 +61,12 @@ class SolverTest:
 
         self.X0 = X0
         # Evaluate the initial point with actual noise for the history
-        self.Z0 = self.problem.eval(self.X0, self.noise_type, self.noise_param)
+        self.Z0_eval = self.problem.eval(self.X0, self.noise_type, self.noise_param)
+        self.Z0_true = self.problem.eval(self.X0, self.noise_type, 0.0)
         
         # Shared History Buffer
         self.history = HistoryBuffer()
-        self.history.add(self.X0, self.Z0)
+        self.history.add(self.X0, self.Z0_eval)
 
         # 3. Instantiate Estimator
         if grad_est_name == "ffd":
@@ -98,7 +99,7 @@ class SolverTest:
             Xn_hist, Zn_hist = self.history.snapshot()
             best_idx = int(np.argmin(Zn_hist))
             self.X0 = Xn_hist[best_idx].copy()
-            self.Z0 = Zn_hist[best_idx]
+            self.Z0_eval = Zn_hist[best_idx]
             
         else:
             raise ValueError(f"Unknown gradient estimator: {grad_est_name}")
@@ -111,17 +112,18 @@ class SolverTest:
             stepsize=1.0,
             stepsizemode=StepSizeMode.ADAPTIVE,
             bfgs=bfgs,
-            z0=self.Z0
+            z0=self.Z0_eval
         )
         
     def run(self):
-        self.hist_z_k = []
+        self.hist_z_k_eval = []
+        self.hist_z_k_true = []
         self.hist_t = []
         self.start_time = datetime.now()
         
         # StandardDescent invokes its callback at the start of each step (current z_k)
         # and after each evaluation (line search or auxiliary sample). We record each
-        # callback so hist_z_k includes the initial z0 plus per-evaluation values.
+        # callback so hist_z_k_eval includes the initial z0 plus per-evaluation values.
         
         def record_state(z_val=None):
             # Record current z_k (or the explicit evaluation value when provided).
@@ -131,11 +133,14 @@ class SolverTest:
                 return
 
             current_z = z_val if z_val is not None else self.solver.z_k
+            # Calculate noiseless value at current point
+            current_z_true = self.problem.eval(self.solver.x_k, self.noise_type, 0.0)
             
             # Calculate elapsed time
             elapsed = (datetime.now() - self.start_time).total_seconds()
             
-            self.hist_z_k.append(current_z)
+            self.hist_z_k_eval.append(current_z)
+            self.hist_z_k_true.append(current_z_true)
             self.hist_t.append(elapsed)
 
         # Attach callbacks
@@ -149,4 +154,11 @@ class SolverTest:
         except StopIteration:
             pass
             
-        return np.array(self.hist_z_k).reshape(-1, 1), np.array(self.hist_t).reshape(-1, 1), self.Z0, self.history.Zn.size
+        return (
+            np.array(self.hist_z_k_eval).reshape(-1, 1),
+            np.array(self.hist_z_k_true).reshape(-1, 1),
+            np.array(self.hist_t).reshape(-1, 1),
+            self.Z0_eval,
+            self.Z0_true,
+            self.history.Zn.size,
+        )
