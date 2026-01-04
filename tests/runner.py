@@ -26,6 +26,10 @@ class SolverTest:
         self.noise_param = noise_param
         self.dims = dims
         self.problem_name = problem_name
+        
+        # Initialize timing (will be set properly in run())
+        self.start_time = None
+        self.solver = None  # Will be set after estimator creation
 
         # 1. Instantiate Problem
         if problem_name == "least-squares":
@@ -41,12 +45,27 @@ class SolverTest:
         else:
             raise ValueError(f"Unknown problem: {problem_name}")
 
-        # Objective function wrapper (binds noise params)
+        # Objective function wrapper (binds noise params and tracks iterate state)
         def obj_func(x):
             # Check budget
             if self.history.Zn.size >= self.maxevals:
                 raise StopIteration("Budget exhausted")
+            
             val = self.problem.eval(x, self.noise_type, self.noise_param)
+            
+            # Get current iterate state for tracking
+            if self.solver is not None:
+                z_k_eval = self.solver.z_k
+                z_k_true = self.problem.eval(self.solver.x_k, self.noise_type, 0.0)
+                t = (datetime.now() - self.start_time).total_seconds() if self.start_time else 0.0
+            else:
+                # Before solver exists, use the evaluated point itself
+                z_k_eval = val
+                z_k_true = self.problem.eval(x, self.noise_type, 0.0)
+                t = 0.0
+            
+            # Add to history with iterate tracking
+            self.history.add(x, val, z_k_eval=z_k_eval, z_k_true=z_k_true, t=t)
             return val
         self.obj_func = obj_func
 
@@ -66,7 +85,8 @@ class SolverTest:
         
         # Shared History Buffer
         self.history = HistoryBuffer()
-        self.history.add(self.X0, self.Z0_eval)
+        # Add initial point with iterate tracking (before solver exists)
+        self.history.add(self.X0, self.Z0_eval, z_k_eval=self.Z0_eval, z_k_true=self.Z0_true, t=0.0)
 
         # 3. Instantiate Estimator
         if grad_est_name == "ffd":
@@ -85,7 +105,9 @@ class SolverTest:
             )
             for i in range(1, X_init.shape[0]):
                 z_val = self.problem.eval(X_init[i], self.noise_type, self.noise_param)  # Direct call
-                self.history.add(X_init[i], z_val)
+                z_true = self.problem.eval(X_init[i], self.noise_type, 0.0)
+                # Track initial simplex points (before solver exists)
+                self.history.add(X_init[i], z_val, z_k_eval=z_val, z_k_true=z_true, t=0.0)
 
             self.estimator = SAGE(
                 self.obj_func,
@@ -116,48 +138,19 @@ class SolverTest:
         )
         
     def run(self):
-        self.hist_z_k_eval = []
-        self.hist_z_k_true = []
-        self.hist_t = []
         self.start_time = datetime.now()
         
-        # StandardDescent invokes its callback at the start of each step (current z_k)
-        # and after each evaluation (line search or auxiliary sample). We record each
-        # callback so hist_z_k_eval includes the initial z0 plus per-evaluation values.
-        
-        def record_state(z_val=None):
-            # Record current z_k (or the explicit evaluation value when provided).
-            # Avoid recording if budget exhausted (handled by StopIteration usually,
-            # but callback might fire right before exception).
-            if self.history.Zn.size > self.maxevals:
-                return
-
-            current_z = z_val if z_val is not None else self.solver.z_k
-            # Calculate noiseless value at current point
-            current_z_true = self.problem.eval(self.solver.x_k, self.noise_type, 0.0)
-            
-            # Calculate elapsed time
-            elapsed = (datetime.now() - self.start_time).total_seconds()
-            
-            self.hist_z_k_eval.append(current_z)
-            self.hist_z_k_true.append(current_z_true)
-            self.hist_t.append(elapsed)
-
-        # Attach callbacks
-        self.solver.callback = record_state
-        if isinstance(self.estimator, SAGE):
-            self.estimator.callback = lambda: record_state(None)
-
         try:
             while self.history.Zn.size < self.maxevals:
                 self.solver.step()
         except StopIteration:
             pass
-            
+        
+        # Return iterate history from HistoryBuffer (aligned with evaluation count)
         return (
-            np.array(self.hist_z_k_eval).reshape(-1, 1),
-            np.array(self.hist_z_k_true).reshape(-1, 1),
-            np.array(self.hist_t).reshape(-1, 1),
+            self.history.z_k_eval_hist.reshape(-1, 1),
+            self.history.z_k_true_hist.reshape(-1, 1),
+            self.history.t_hist.reshape(-1, 1),
             self.Z0_eval,
             self.Z0_true,
             self.history.Zn.size,

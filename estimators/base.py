@@ -37,7 +37,7 @@ class BaseGradientEstimator(ABC):
     
     def update(self, x: np.ndarray, y: float):
         """
-        Optional method to update internal history if the estimator is stateful.
+        Optional method to update internal state if the estimator is stateful.
+        Note: history.add() is handled by obj_func, so we don't add here.
         """
-        if self.history is not None:
-            self.history.add(x, y)
+        pass

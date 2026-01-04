@@ -398,7 +398,7 @@ class SAGE(BaseGradientEstimator):
         self.history.add(x, z)
 
     def update(self, x: np.ndarray, z: float):
-        self._add_sample(x, z)
+        # Note: history.add() is handled by obj_func, so we just sync and recompute
         self._sync_history()
         if hasattr(self, "x_current") and self.x_current is not None:
             if np.array_equal(x, self.x_current):
