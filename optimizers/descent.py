@@ -114,11 +114,6 @@ class StandardDescent:
                     self.z_k = z_next
                 self.grad_estimator.update(x_next, z_next)
 
-                # If the estimator recomputes on update (e.g., SAGE), use its cached gradient.
-                if getattr(self.grad_estimator, "recompute_on_update", False):
-                    if hasattr(self.grad_estimator, "gdt_est"):
-                        self.gdt_est = self.grad_estimator.gdt_est.copy()
-
                 # Check Armijo condition using the current gradient estimate.
                 descent_term = norm(self.gdt_est)**2
                 
@@ -137,9 +132,8 @@ class StandardDescent:
                         self.eta = self.eta * self.etaM
                     else:
                         # Reset
-                        # Trigger an extra gradient update here; this consumes RNG in grad_set_diam.
-                        if getattr(self.grad_estimator, "recompute_on_update", False):
-                            self.gdt_est = self.grad_estimator(self.x_k, force=True)
+                        # Recompute gradient before restarting with the reset step size.
+                        self.gdt_est = self.grad_estimator(self.x_k, force=True)
                         self.eta = self.eta0
                         # Note: Reset eta before computing x_n = x_k - eta * g.
                         # Since we loop, we update p_k below and then x_next will be computed with eta0.

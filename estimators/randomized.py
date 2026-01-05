@@ -43,7 +43,7 @@ class GSGEstimator(BaseGradientEstimator):
         self.u = u  # Smoothing radius / step size
         self.rng = np.random.default_rng(seed)
 
-    def __call__(self, x: np.ndarray) -> np.ndarray:
+    def __call__(self, x: np.ndarray, force: bool = False) -> np.ndarray:
         """Estimate gradient using GSG."""
         grad = np.zeros(self.dim)
         z_k = None
@@ -110,7 +110,7 @@ class cGSGEstimator(BaseGradientEstimator):
         self.u = u
         self.rng = np.random.default_rng(seed)
 
-    def __call__(self, x: np.ndarray) -> np.ndarray:
+    def __call__(self, x: np.ndarray, force: bool = False) -> np.ndarray:
         """Estimate gradient using cGSG."""
         grad = np.zeros(self.dim)
         

@@ -35,7 +35,7 @@ The benchmark runner supports the following gradient estimators (set `LIST_GRAD_
 - `CFD`: step size `1e-6`
 - `GSG` / `cGSG`: `m = D`, `u = 1e-6`, `seed = trial_id`
 - `NMXFD`: default parameters in `estimators/finite_diff.py`
-- `SAGE`: uses a simplex-like initial history around `x0`
+- `SAGE`: starts from `x0` and internally seeds forward-coordinate points when history has a single sample (`init_step=1e-6`)
 
 All gradient estimators are run through `StandardDescent` in `optimizers/descent.py`, which includes
 backtracking line search (`StepSizeMode.ADAPTIVE`).

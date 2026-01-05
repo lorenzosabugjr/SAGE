@@ -35,7 +35,7 @@ class FFDEstimator(BaseGradientEstimator):
         super().__init__(fun, dim, history=history)
         self.step = step
 
-    def __call__(self, x: np.ndarray) -> np.ndarray:
+    def __call__(self, x: np.ndarray, force: bool = False) -> np.ndarray:
         """
         Estimate gradient at x using forward differences.
         """
@@ -91,7 +91,7 @@ class CFDEstimator(BaseGradientEstimator):
         super().__init__(fun, dim, history=history)
         self.step = step
 
-    def __call__(self, x: np.ndarray) -> np.ndarray:
+    def __call__(self, x: np.ndarray, force: bool = False) -> np.ndarray:
         """
         Estimate gradient at x using central differences.
         """
@@ -155,7 +155,7 @@ class NMXFDEstimator(BaseGradientEstimator):
         numerator = (x - mu) * np.exp(-((x - mu)**2) / (2 * sigma**2))
         return -numerator / denominator
 
-    def __call__(self, x: np.ndarray) -> np.ndarray:
+    def __call__(self, x: np.ndarray, force: bool = False) -> np.ndarray:
         grad = np.zeros(self.dim)
         
         # Calculate integration coefficients

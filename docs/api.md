@@ -18,7 +18,7 @@ class SAGE(BaseGradientEstimator):
         history: Optional[HistoryBuffer] = None,
         diam_mode: Optional[str] = None,
         callback: Optional[Callable[[], None]] = None,
-        init_step: float = 1e-3,
+        init_step: float = 1e-6,
     )
 ```
 
@@ -30,10 +30,10 @@ class SAGE(BaseGradientEstimator):
 *   `history`: Optional shared `HistoryBuffer` used to collect all evaluations (e.g., from line search).
 *   `diam_mode`: `"exact"` or `"approx"`. Defaults to `"approx"` when `quickmode=True`.
 *   `callback`: Optional callback invoked after each auxiliary evaluation.
-*   `init_step`: Step size for the initial simplex when history is empty.
+*   `init_step`: Step size for the initial simplex when history has 0 or 1 samples.
 
 SAGE estimates the noise bound internally.
-If history is empty on the first call, SAGE evaluates `x0` and `x0 + init_step * e_i` to seed the history.
+If history has 0 or 1 samples on the first call, SAGE evaluates `x0` and `x0 + init_step * e_i` to seed the history.
 
 ---
 

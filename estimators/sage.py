@@ -33,7 +33,7 @@ class SAGE(BaseGradientEstimator):
         history: Optional[HistoryBuffer] = None,
         diam_mode: Optional[str] = None,
         callback: Optional[Callable[[], None]] = None,
-        init_step: float = 1e-3,
+        init_step: float = 1e-6,
     ):
         """
         Initialize the SAGE estimator.
@@ -46,13 +46,12 @@ class SAGE(BaseGradientEstimator):
             history: Optional shared HistoryBuffer used to collect evaluations.
             diam_mode: "exact" or "approx". Defaults to "approx" when quickmode is True.
             callback: Optional callback invoked after each auxiliary evaluation.
-            init_step: Step size used to seed an initial simplex when history is empty.
+            init_step: Step size used to seed an initial simplex when history has 0 or 1 samples.
         """
         super().__init__(fun, dim, history=history)
         self.quickmode = quickmode
         self.callback = callback
         self.init_step = init_step
-        self.recompute_on_update = True
         self.center_sample_on_move = True
         if diam_mode is None:
             self.diam_mode = "approx" if quickmode else "exact"
@@ -99,6 +98,29 @@ class SAGE(BaseGradientEstimator):
             best_idx = np.argmin(self.Zn)
             self._recompute_at(self.Xn[best_idx])
 
+    def _eval_and_record(self, x: np.ndarray) -> float:
+        if self.history is None:
+            return self.fun(x)
+
+        n_before = self.history.Zn.size
+        z = self.fun(x)
+        if self.history.Zn.size == n_before:
+            self._add_sample(x, z)
+        self._sync_history()
+        return z
+
+    def _seed_forward_simplex_if_singleton(self, x: np.ndarray) -> None:
+        if self.history is None or self.dim <= 0:
+            return
+
+        if self.history.Zn.size != 1:
+            return
+
+        for i in range(self.dim):
+            x_step = x.copy()
+            x_step[i] += self.init_step
+            self._eval_and_record(x_step)
+
     def _recompute_at(self, x: np.ndarray) -> None:
         self.x_current = x
         self._grad_est_lp(x)
@@ -124,14 +146,16 @@ class SAGE(BaseGradientEstimator):
         
         # 1. Identify relevant samples
         self._sync_history()
-        x_in = np.all(np.equal(self.Xn, x), axis=1)
-        if not np.any(x_in):
+        x_idx = self.history.find_indices(x)
+        if x_idx.size == 0:
             # If x is not in history, evaluate it
-            z = self.fun(x)
-            self._add_sample(x, z)
-            x_idx = [self.Zn.size - 1]
-        else:
-            x_idx = np.nonzero(x_in)[0]
+            self._eval_and_record(x)
+            x_idx = self.history.find_indices(x)
+
+        # Seed a forward-coordinate simplex if only one sample exists.
+        self._seed_forward_simplex_if_singleton(x)
+        self._sync_history()
+        x_idx = self.history.find_indices(x)
 
         # 2. Select neighbors (Quickmode logic)
         if self.Zn.size > 5*D + 1 and self.quickmode:
@@ -287,18 +311,16 @@ class SAGE(BaseGradientEstimator):
         self._sync_history()
         sample_added = False
         if self.Xn.size == 0:
-            x0 = np.asarray(x)
-            self._add_sample(x0, self.fun(x0))
-            for i in range(self.dim):
-                x_step = x0.copy()
-                x_step[i] += self.init_step
-                self._add_sample(x_step, self.fun(x_step))
+            n_before = self.history.Zn.size
+            self._eval_and_record(x)
+            self._seed_forward_simplex_if_singleton(np.asarray(x))
             self._sync_history()
-            sample_added = True
-        if not np.any(np.all(np.equal(self.Xn, x), axis=1)):
-            self._add_sample(x, self.fun(x))
-            sample_added = True
+            sample_added = self.history.Zn.size != n_before
+        elif self.history.find_indices(x).size == 0:
+            n_before = self.history.Zn.size
+            self._eval_and_record(x)
             self._sync_history()
+            sample_added = self.history.Zn.size != n_before
 
         history_changed = self._last_update_n is None or self._last_update_n != self.history.Zn.size
         x_changed = self.x_current is None or not np.array_equal(self.x_current, x)

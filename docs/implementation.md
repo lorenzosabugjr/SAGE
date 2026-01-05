@@ -15,7 +15,7 @@ This document ties the theory in the paper (https://arxiv.org/abs/2508.19400) to
 - `gdtset_diaid`: target diameter
 - `gdtset_diath`: current threshold
 - `aux_samples_count`: number of refinement samples added in the current call
-- `init_step`: step size for the initial simplex when history is empty
+- `init_step`: step size for the initial simplex when history has 0 or 1 samples
 
 ## 2. LP construction
 
@@ -101,7 +101,7 @@ Additional details:
 
 SAGE may evaluate `fun` at:
 
-- the initial simplex points `x0` and `x0 + init_step * e_i` when history is empty
+- the initial simplex points `x0` and `x0 + init_step * e_i` when history has 0 or 1 samples
 - the query point `x` if it is not in history
 - the current center point after a move (even if already in history) to keep evaluation order consistent
 - multiple refinement points during a single call

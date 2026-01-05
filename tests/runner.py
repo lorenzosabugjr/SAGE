@@ -74,7 +74,7 @@ class SolverTest:
         X0 = 1e2 * (np.random.rand(dims) - 0.5)
         # Use 0.0 noise for the check loop
         Z0_tmp = self.problem.eval(X0, self.noise_type, 0.0) 
-        while Z0_tmp <= 10 * max(1e-9, noise_param):
+        while Z0_tmp <= 1.0:
             X0 = 1e2 * (np.random.rand(dims) - 0.5)
             Z0_tmp = self.problem.eval(X0, self.noise_type, 0.0)
 
@@ -100,15 +100,6 @@ class SolverTest:
         elif grad_est_name == "nmxfd":
             self.estimator = NMXFDEstimator(self.obj_func, dims, history=self.history)
         elif grad_est_name == "sage":
-            X_init = np.tile(X0, (dims + 1, 1)) + np.vstack(
-                (np.zeros((1, dims)), np.identity(dims))
-            )
-            for i in range(1, X_init.shape[0]):
-                z_val = self.problem.eval(X_init[i], self.noise_type, self.noise_param)  # Direct call
-                z_true = self.problem.eval(X_init[i], self.noise_type, 0.0)
-                # Track initial simplex points (before solver exists)
-                self.history.add(X_init[i], z_val, z_k_eval=z_val, z_k_true=z_true, t=0.0)
-
             self.estimator = SAGE(
                 self.obj_func,
                 dims,
