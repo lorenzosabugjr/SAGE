@@ -1,0 +1,217 @@
+"""
+Gradient Accuracy Benchmark
+============================
+For each (dim, problem, condnum, noise_type, noise_param) combo from config,
+generate GRAD_BMK_NPOINTS random test points, compute the true gradient at each,
+then evaluate every estimator's gradient estimate and measure error.
+
+Metrics per point:
+  - Relative error:    ||g_hat - g_true|| / ||g_true||
+  - Absolute error:    ||g_hat - g_true||
+  - Cosine similarity: g_hat · g_true / (||g_hat|| ||g_true||)
+  - Max component err: max_i |g_hat_i - g_true_i|
+
+Results saved as .mat files in results/ and printed to console.
+"""
+
+import argparse
+import os
+import sys
+
+import numpy as np
+import yaml
+from scipy.io import savemat
+
+# Ensure project root is on path
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+from tests.factories import create_problem, create_estimator
+from utils.noise import NoiseType
+from utils.history import HistoryBuffer
+
+
+def load_config(path: str) -> dict:
+    """Load benchmark configuration from a YAML file."""
+    with open(path, "r") as f:
+        return yaml.safe_load(f)
+
+
+# ---------------------------------------------------------------------------
+# Metric helpers
+# ---------------------------------------------------------------------------
+EPS = 1e-12  # guard against division by zero
+
+
+def _compute_metrics(g_hat: np.ndarray, g_true: np.ndarray):
+    """Return (rel_err, abs_err, cos_sim, max_comp_err)."""
+    diff = g_hat - g_true
+    abs_err = float(np.linalg.norm(diff))
+    g_true_norm = float(np.linalg.norm(g_true))
+    g_hat_norm = float(np.linalg.norm(g_hat))
+
+    rel_err = abs_err / g_true_norm if g_true_norm > EPS else np.nan
+    if g_true_norm > EPS and g_hat_norm > EPS:
+        cos_sim = float(np.dot(g_hat, g_true) / (g_hat_norm * g_true_norm))
+    else:
+        cos_sim = np.nan
+    max_comp_err = float(np.max(np.abs(diff)))
+    return rel_err, abs_err, cos_sim, max_comp_err
+
+
+# ---------------------------------------------------------------------------
+# Main benchmark
+# ---------------------------------------------------------------------------
+def run_gradient_benchmark(config_path: str):
+    cfg = load_config(config_path)
+
+    LIST_DIMS = cfg["list_dims"]
+    LIST_PROBLEM = cfg["list_problem"]
+    LIST_CONDNUM = cfg["list_condnum"]
+    LIST_NOISE_PARAM = cfg["list_noise_param"]
+    LIST_NOISE_TYPE = cfg["list_noise_type"]
+    GRAD_BMK_NPOINTS = cfg["grad_bmk_npoints"]
+    GRAD_BMK_NPROBLEMS = cfg["grad_bmk_nproblems"]
+    GRAD_BMK_ESTIMATORS = cfg["grad_bmk_estimators"]
+
+    os.makedirs("results", exist_ok=True)
+
+    total_pts = GRAD_BMK_NPOINTS * GRAD_BMK_NPROBLEMS
+
+    for bmk_D in LIST_DIMS:
+        for bmk_prob in LIST_PROBLEM:
+            for bmk_condnum in LIST_CONDNUM:
+
+                # Pre-generate all problems and test points
+                # For each random seed, create a problem + 250 test points
+                problems = []
+                X_tests = []
+                G_trues = []
+                for seed in range(1, GRAD_BMK_NPROBLEMS + 1):
+                    problem = create_problem(bmk_prob, bmk_D, bmk_condnum, randseed=seed)
+                    rng = np.random.RandomState(42 + seed)
+                    X_test = 1e2 * (rng.rand(GRAD_BMK_NPOINTS, bmk_D) - 0.5)
+                    G_true = np.array([problem.gradient(X_test[j]) for j in range(GRAD_BMK_NPOINTS)])
+                    problems.append(problem)
+                    X_tests.append(X_test)
+                    G_trues.append(G_true)
+
+                for bmk_noise_type in LIST_NOISE_TYPE:
+                    noise_enum = (
+                        NoiseType.UNIFORM if bmk_noise_type == "uniform" else NoiseType.GAUSSIAN
+                    )
+
+                    for bmk_noise in LIST_NOISE_PARAM:
+                        print("=" * 60)
+                        print(
+                            f"GRAD BMK | {bmk_D}D {bmk_prob} cond={bmk_condnum:.0e} "
+                            f"{bmk_noise_type} noise={bmk_noise:.6f} "
+                            f"({GRAD_BMK_NPROBLEMS} problems x {GRAD_BMK_NPOINTS} pts)"
+                        )
+                        print("=" * 60)
+
+                        for est_name in GRAD_BMK_ESTIMATORS:
+                            is_sage = (est_name == "sage")
+
+                            # Flat arrays across all problems × points
+                            rel_errs = np.full(total_pts, np.nan)
+                            abs_errs = np.full(total_pts, np.nan)
+                            cos_sims = np.full(total_pts, np.nan)
+                            max_errs = np.full(total_pts, np.nan)
+                            n_evals  = np.zeros(total_pts, dtype=int)
+                            if is_sage:
+                                aux_step_sizes_counts = np.zeros(total_pts, dtype=int)
+                                aux_step_sizes_flat = np.empty((0,))
+
+                            for pi in range(GRAD_BMK_NPROBLEMS):
+                                problem = problems[pi]
+                                X_test = X_tests[pi]
+                                G_true = G_trues[pi]
+
+                                if is_sage:
+                                    print(f"  {est_name:>10s} | Problem {pi+1}/{GRAD_BMK_NPROBLEMS}")
+
+                                offset = pi * GRAD_BMK_NPOINTS
+                                for j in range(GRAD_BMK_NPOINTS):
+                                    idx = offset + j
+
+                                    # Fresh history per query (memoryless)
+                                    history = HistoryBuffer()
+
+                                    def obj_func(x, _hist=history, _prob=problem,
+                                                 _nt=noise_enum, _np=bmk_noise):
+                                        val = _prob.eval(x, _nt, _np)
+                                        _hist.add(x, val)
+                                        return val
+
+                                    try:
+                                        estimator = create_estimator(
+                                            est_name, obj_func, bmk_D, history,
+                                            randseed=pi + 1,
+                                        )
+                                    except Exception as e:
+                                        if pi == 0 and j == 0:
+                                            print(f"  {est_name:>10s} |   ERROR creating estimator: {e}")
+                                        continue
+
+                                    evals_before = history.Zn.size
+                                    try:
+                                        g_hat = estimator(X_test[j])
+                                        evals_after = history.Zn.size
+                                        n_evals[idx] = evals_after - evals_before
+                                        (rel_errs[idx], abs_errs[idx],
+                                         cos_sims[idx], max_errs[idx]) = _compute_metrics(
+                                            g_hat, G_true[j]
+                                        )
+                                        if is_sage and hasattr(estimator, "aux_step_sizes_current"):
+                                            steps = np.asarray(estimator.aux_step_sizes_current).reshape(-1)
+                                            aux_step_sizes_counts[idx] = steps.size
+                                            if steps.size > 0:
+                                                aux_step_sizes_flat = np.hstack((aux_step_sizes_flat, steps))
+                                    except Exception as e:
+                                        evals_after = history.Zn.size
+                                        n_evals[idx] = evals_after - evals_before
+                                        if is_sage:
+                                            aux_step_sizes_counts[idx] = 0
+                                        if pi == 0 and j == 0:
+                                            print(f"  {est_name:>10s} |   point error: {e}")
+
+                            # Aggregate statistics (ignoring NaN)
+                            mean_rel = float(np.nanmean(rel_errs))
+                            mean_abs = float(np.nanmean(abs_errs))
+                            mean_cos = float(np.nanmean(cos_sims))
+                            mean_max = float(np.nanmean(max_errs))
+                            mean_ev  = float(np.mean(n_evals))
+
+                            print(
+                                f"  {est_name:>10s} | "
+                                f"rel={mean_rel:.3e}  abs={mean_abs:.3e}  "
+                                f"cos={mean_cos:.6f}  maxcomp={mean_max:.3e}  "
+                                f"evals/pt={mean_ev:.1f}"
+                            )
+
+                            # Save .mat for this estimator
+                            save_dict = {
+                                "rel_err": rel_errs,
+                                "abs_err": abs_errs,
+                                "cos_sim": cos_sims,
+                                "max_err": max_errs,
+                                "n_evals": n_evals,
+                            }
+                            if is_sage:
+                                save_dict["aux_step_sizes_flat"] = aux_step_sizes_flat
+                                save_dict["aux_step_sizes_counts"] = aux_step_sizes_counts
+                            fname = (
+                                f"results/grad-bmk-{bmk_D}D-{bmk_prob}-{bmk_condnum}-"
+                                f"{est_name}-{bmk_noise_type}-{bmk_noise:.6f}.mat"
+                            )
+                            savemat(fname, save_dict)
+                            print(f"  -> saved {fname}")
+
+                        print()  # blank line after all estimators for this config
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Gradient Accuracy Benchmark")
+    parser.add_argument("--config", required=True, help="Path to YAML config file")
+    args = parser.parse_args()
+    run_gradient_benchmark(args.config)

@@ -1,0 +1,63 @@
+# Benchmarks
+
+This document summarizes the benchmark setup used in the paper (https://arxiv.org/abs/2508.19400) and implemented in `tests/`.
+
+## 1. Problems (P1-P5)
+
+The benchmark problems map to the `problems/` modules:
+
+- **P1 (Least Squares):** `LeastSquares` in `problems/linear.py`
+- **P2 (L1-regularized Least Squares):** `Lasso` in `problems/linear.py`
+- **P3 (Log-sum-exp):** `LogSumExp` in `problems/misc.py`
+- **P4 (L1-regularized Logistic Regression):** `L1LogReg` in `problems/logistic.py`
+- **P5 (L2-regularized Logistic Regression):** `L2LogReg` in `problems/logistic.py`
+
+These match the definitions listed in the paper.
+
+## 2. Settings
+
+Defaults are specified in `tests/config_benchmark_grad.yaml`:
+
+- Dimensions: `[20]`
+- Condition numbers: `[1e8]`
+- Noise parameters: `[0.0]`
+- Noise types: `["uniform"]`
+- Problems per config: `grad_bmk_nproblems: 100` (random seeds 1–100)
+- Test points per problem: `grad_bmk_npoints: 250`
+
+## 3. Estimators and defaults
+
+The benchmark supports the following gradient estimators (set `grad_bmk_estimators` in the YAML config):
+
+- `ffd` / `cfd`: Forward / Central Finite Differences, step size `1e-6`
+- `gsg` / `cgsg`: Gaussian Smoothing, `m = D`, `u = 1e-6`, `seed = problem_seed`
+- `nmxfd`: Normalized Mixed Finite Differences, default parameters in `estimators/finite_diff.py`
+- `sage`: SAGE with `quickmode=True`, `diam_mode="approx"`
+- `truth`: Analytical gradient (reference, not typically benchmarked)
+
+Factory functions in `tests/factories.py` instantiate problems and estimators by name.
+
+## 4. Running benchmarks
+
+From the repo root:
+
+```bash
+python -m tests.benchmark_grad --config tests/config_benchmark_grad.yaml
+```
+
+Results are saved to `results/` as `.mat` files.
+
+## 5. Metrics
+
+Per test point, the benchmark computes:
+
+- **Relative error**: `||g_hat - g_true|| / ||g_true||`
+- **Absolute error**: `||g_hat - g_true||`
+- **Cosine similarity**: `g_hat · g_true / (||g_hat|| ||g_true||)`
+- **Max component error**: `max_i |g_hat_i - g_true_i|`
+
+The `.mat` files include:
+
+- `rel_err`, `abs_err`, `cos_sim`, `max_err`: per-point metric arrays
+- `n_evals`: number of function evaluations per point
+- `aux_step_sizes_flat`, `aux_step_sizes_counts`: auxiliary step sizes (SAGE only)
