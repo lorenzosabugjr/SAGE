@@ -120,7 +120,7 @@ class SAGE(BaseGradientEstimator):
         self._diag_diam_lp_time = 0.0
         self._diag_update_count = 0      # update() calls
         self._diag_update_time = 0.0
-        self._diag_enabled = True        # set False to silence
+        self._diag_enabled = False        # set False to silence
         
         # Perform initial gradient update when history is pre-seeded
         if self.Xn.size > 0:

@@ -4,21 +4,22 @@
 list_dims: [20]
 
 # Condition numbers
-list_condnum: [1.0e+8]
+list_condnum: [1.0]
 
 # Noise parameters (Unified: serves as bound for Uniform or sigma for Gaussian)
 # Original: [1.0, 1.0e-3, 0.0]
 list_noise_param: [0.0]
 
 # Noise types to sweep (options: "uniform", "gaussian")
-list_noise_type: ["uniform"]
+list_noise_type: ["gaussian"]
 
 # Problems (options: "least-squares", "lasso", "l1-log-reg", "l2-log-reg", "log-sum-exp")
 list_problem:
-  - "log-sum-exp"
+  - "least-squares"
 
 # Gradient Accuracy Benchmark Settings
 grad_bmk_npoints: 250         # Number of random test points per problem instance
 grad_bmk_nproblems: 100       # Number of random problem instances (randseeds 1..100)
 grad_bmk_estimators:           # Estimators to benchmark ("truth" is the reference, not listed here)
-  - "sage"
+  - "ffd"
+  - "cfd"
