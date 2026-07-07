@@ -11,29 +11,80 @@ Metrics per point:
   - Cosine similarity: g_hat · g_true / (||g_hat|| ||g_true||)
   - Max component err: max_i |g_hat_i - g_true_i|
 
-Results saved as .mat files in results/ and printed to console.
+Results saved as .mat files in a timestamped run folder under results/,
+alongside a config snapshot and stdout log, and printed to console.
 """
 
 import argparse
 import os
 import sys
+from pathlib import Path
 
 import numpy as np
 import yaml
-from scipy.io import savemat
 
 # Ensure project root is on path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from tests.factories import create_problem, create_estimator
+from utils.benchmark_artifacts import copy_config, create_run_dir, get_git_commit, tee_stdout
 from utils.noise import NoiseType
 from utils.history import HistoryBuffer
+
+RESULTS_ROOT = Path("results")
 
 
 def load_config(path: str) -> dict:
     """Load benchmark configuration from a YAML file."""
     with open(path, "r") as f:
-        return yaml.safe_load(f)
+        cfg = yaml.safe_load(f)
+
+    if cfg is None:
+        cfg = {}
+    if not isinstance(cfg, dict):
+        raise ValueError("Benchmark config must be a mapping")
+
+    _coerce_numeric_list(cfg, "list_dims", _coerce_int)
+    _coerce_numeric_list(cfg, "list_condnum", _coerce_float)
+    _coerce_numeric_list(cfg, "list_noise_param", _coerce_float)
+    _coerce_optional_scalar(cfg, "grad_bmk_npoints", _coerce_int)
+    _coerce_optional_scalar(cfg, "grad_bmk_nproblems", _coerce_int)
+    return cfg
+
+
+def _coerce_float(value, key: str) -> float:
+    if isinstance(value, bool):
+        raise ValueError(f"{key} must be numeric, got {value!r}")
+    try:
+        return float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{key} must be numeric, got {value!r}") from exc
+
+
+def _coerce_int(value, key: str) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"{key} must be an integer, got {value!r}")
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{key} must be an integer, got {value!r}") from exc
+
+    if not number.is_integer():
+        raise ValueError(f"{key} must be an integer, got {value!r}")
+    return int(number)
+
+
+def _coerce_numeric_list(cfg: dict, key: str, coerce):
+    if key not in cfg:
+        return
+    values = cfg[key]
+    if not isinstance(values, list):
+        raise ValueError(f"{key} must be a list")
+    cfg[key] = [coerce(value, f"{key}[{idx}]") for idx, value in enumerate(values)]
+
+
+def _coerce_optional_scalar(cfg: dict, key: str, coerce):
+    if key in cfg:
+        cfg[key] = coerce(cfg[key], key)
 
 
 # ---------------------------------------------------------------------------
@@ -62,6 +113,30 @@ def _compute_metrics(g_hat: np.ndarray, g_true: np.ndarray):
 # Main benchmark
 # ---------------------------------------------------------------------------
 def run_gradient_benchmark(config_path: str):
+    """Public entry point: sets up run artifacts, then runs the benchmark."""
+    run_dir = create_run_dir(RESULTS_ROOT)
+    config_snapshot = copy_config(config_path, run_dir)
+    log_path = run_dir / "log.txt"
+
+    metadata = {
+        "config_path": str(config_snapshot),
+        "output_dir": str(run_dir),
+        "run_timestamp": run_dir.name,
+        "git_commit": get_git_commit(),
+    }
+
+    with open(log_path, "w") as log_file:
+        with tee_stdout(log_file):
+            print(f"Benchmark output directory: {run_dir}")
+            print(f"Config snapshot: {config_snapshot}")
+            print(f"Stdout log: {log_path}")
+            _run_gradient_benchmark(config_path, run_dir, metadata)
+
+
+def _run_gradient_benchmark(config_path: str, output_dir: Path, metadata: dict):
+    from scipy.io import savemat
+    from tests.factories import create_problem, create_estimator
+
     cfg = load_config(config_path)
 
     LIST_DIMS = cfg["list_dims"]
@@ -72,8 +147,10 @@ def run_gradient_benchmark(config_path: str):
     GRAD_BMK_NPOINTS = cfg["grad_bmk_npoints"]
     GRAD_BMK_NPROBLEMS = cfg["grad_bmk_nproblems"]
     GRAD_BMK_ESTIMATORS = cfg["grad_bmk_estimators"]
+    GRAD_BMK_DTYPE = np.dtype(cfg.get("grad_bmk_dtype", "float128"))
+    GRAD_BMK_STEP = GRAD_BMK_DTYPE.type(cfg.get("gdtcalcstep", "1e-6"))
 
-    os.makedirs("results", exist_ok=True)
+    output_dir = Path(output_dir)
 
     total_pts = GRAD_BMK_NPOINTS * GRAD_BMK_NPROBLEMS
 
@@ -89,8 +166,14 @@ def run_gradient_benchmark(config_path: str):
                 for seed in range(1, GRAD_BMK_NPROBLEMS + 1):
                     problem = create_problem(bmk_prob, bmk_D, bmk_condnum, randseed=seed)
                     rng = np.random.RandomState(42 + seed)
-                    X_test = 1e2 * (rng.rand(GRAD_BMK_NPOINTS, bmk_D) - 0.5)
-                    G_true = np.array([problem.gradient(X_test[j]) for j in range(GRAD_BMK_NPOINTS)])
+                    X_test = GRAD_BMK_DTYPE.type("1e2") * (
+                        rng.rand(GRAD_BMK_NPOINTS, bmk_D).astype(GRAD_BMK_DTYPE)
+                        - GRAD_BMK_DTYPE.type("0.5")
+                    )
+                    G_true = np.array(
+                        [problem.gradient(X_test[j]) for j in range(GRAD_BMK_NPOINTS)],
+                        dtype=GRAD_BMK_DTYPE,
+                    )
                     problems.append(problem)
                     X_tests.append(X_test)
                     G_trues.append(G_true)
@@ -105,7 +188,8 @@ def run_gradient_benchmark(config_path: str):
                         print(
                             f"GRAD BMK | {bmk_D}D {bmk_prob} cond={bmk_condnum:.0e} "
                             f"{bmk_noise_type} noise={bmk_noise:.6f} "
-                            f"({GRAD_BMK_NPROBLEMS} problems x {GRAD_BMK_NPOINTS} pts)"
+                            f"({GRAD_BMK_NPROBLEMS} problems x {GRAD_BMK_NPOINTS} pts) "
+                            f"dtype={GRAD_BMK_DTYPE.name}"
                         )
                         print("=" * 60)
 
@@ -137,16 +221,25 @@ def run_gradient_benchmark(config_path: str):
                                     # Fresh history per query (memoryless)
                                     history = HistoryBuffer()
 
-                                    def obj_func(x, _hist=history, _prob=problem,
-                                                 _nt=noise_enum, _np=bmk_noise):
-                                        val = _prob.eval(x, _nt, _np)
+                                    def obj_func(
+                                        x,
+                                        _hist=history,
+                                        _prob=problem,
+                                        _nt=noise_enum,
+                                        _noise_param=GRAD_BMK_DTYPE.type(bmk_noise),
+                                        _dtype=GRAD_BMK_DTYPE,
+                                    ):
+                                        x = np.asarray(x, dtype=_dtype)
+                                        val = _dtype.type(_prob.eval(x, _nt, _noise_param))
                                         _hist.add(x, val)
                                         return val
 
                                     try:
                                         estimator = create_estimator(
                                             est_name, obj_func, bmk_D, history,
+                                            gdtcalcstep=GRAD_BMK_STEP,
                                             randseed=pi + 1,
+                                            dtype=GRAD_BMK_DTYPE,
                                         )
                                     except Exception as e:
                                         if pi == 0 and j == 0:
@@ -200,11 +293,12 @@ def run_gradient_benchmark(config_path: str):
                             if is_sage:
                                 save_dict["aux_step_sizes_flat"] = aux_step_sizes_flat
                                 save_dict["aux_step_sizes_counts"] = aux_step_sizes_counts
-                            fname = (
-                                f"results/grad-bmk-{bmk_D}D-{bmk_prob}-{bmk_condnum}-"
+                            save_dict.update(metadata)
+                            fname = output_dir / (
+                                f"grad-bmk-{bmk_D}D-{bmk_prob}-{bmk_condnum}-"
                                 f"{est_name}-{bmk_noise_type}-{bmk_noise:.6f}.mat"
                             )
-                            savemat(fname, save_dict)
+                            savemat(str(fname), save_dict)
                             print(f"  -> saved {fname}")
 
                         print()  # blank line after all estimators for this config

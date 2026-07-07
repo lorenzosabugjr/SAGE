@@ -7,6 +7,8 @@ Used by benchmark scripts, smoke tests, and the optimization runner.
 import os
 import sys
 
+import numpy as np
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from problems import LeastSquares, Lasso, L1LogReg, L2LogReg, LogSumExp
@@ -44,6 +46,7 @@ def create_estimator(
     history: HistoryBuffer,
     gdtcalcstep: float = 1e-6,
     randseed: int = 0,
+    dtype=np.float128,
     **sage_kwargs,
 ):
     """Instantiate a gradient estimator by name.
@@ -56,13 +59,13 @@ def create_estimator(
     (e.g. ``quickmode``, ``diam_mode``, ``init_step``).
     """
     if name == "ffd":
-        return FFDEstimator(obj_func, dims, step=gdtcalcstep, history=history)
+        return FFDEstimator(obj_func, dims, step=gdtcalcstep, history=history, dtype=dtype)
     elif name == "ffd1.0":
-        return FFDEstimator(obj_func, dims, step=1.0, history=history)
+        return FFDEstimator(obj_func, dims, step=1.0, history=history, dtype=dtype)
     elif name == "cfd":
-        return CFDEstimator(obj_func, dims, step=gdtcalcstep, history=history)
+        return CFDEstimator(obj_func, dims, step=gdtcalcstep, history=history, dtype=dtype)
     elif name == "cfd1.0":
-        return CFDEstimator(obj_func, dims, step=1.0, history=history)
+        return CFDEstimator(obj_func, dims, step=1.0, history=history, dtype=dtype)
     elif name == "gsg":
         return GSGEstimator(obj_func, dims, m=dims, u=gdtcalcstep, seed=randseed, history=history)
     elif name == "gsg1.0":

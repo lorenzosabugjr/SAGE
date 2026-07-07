@@ -23,6 +23,7 @@ class FFDEstimator(BaseGradientEstimator):
         dim: int,
         step: float = 1e-6,
         history=None,
+        dtype=np.float128,
     ):
         """
         Initialize the FFD estimator.
@@ -33,26 +34,30 @@ class FFDEstimator(BaseGradientEstimator):
             step: Finite difference step size.
         """
         super().__init__(fun, dim, history=history)
-        self.step = step
+        self.dtype = np.dtype(dtype)
+        self.step = self.dtype.type(step)
 
     def __call__(self, x: np.ndarray, force: bool = False) -> np.ndarray:
         """
         Estimate gradient at x using forward differences.
         """
-        grad = np.zeros(self.dim)
+        x = np.asarray(x, dtype=self.dtype)
+        grad = np.zeros(self.dim, dtype=self.dtype)
         z_k = None
         if self.history is not None:
             x_idx = self.history.find_indices(x)
             if x_idx.size > 0:
-                z_k = self.history.Zn[x_idx[0]]
+                z_candidate = self.history.Zn[x_idx[0]]
+                if self.history.Xn.dtype == self.dtype and np.asarray(z_candidate).dtype == self.dtype:
+                    z_k = self.dtype.type(z_candidate)
         if z_k is None:
-            z_k = self.fun(x)
+            z_k = self.dtype.type(self.fun(x))
             self.update(x, z_k)
         
         for i in range(self.dim):
             x_step = x.copy()
             x_step[i] += self.step
-            z_step = self.fun(x_step)
+            z_step = self.dtype.type(self.fun(x_step))
             self.update(x_step, z_step)
             grad[i] = (z_step - z_k) / self.step
             
@@ -79,6 +84,7 @@ class CFDEstimator(BaseGradientEstimator):
         dim: int,
         step: float = 1e-6,
         history=None,
+        dtype=np.float128,
     ):
         """
         Initialize the CFD estimator.
@@ -89,26 +95,28 @@ class CFDEstimator(BaseGradientEstimator):
             step: Finite difference step size.
         """
         super().__init__(fun, dim, history=history)
-        self.step = step
+        self.dtype = np.dtype(dtype)
+        self.step = self.dtype.type(step)
 
     def __call__(self, x: np.ndarray, force: bool = False) -> np.ndarray:
         """
         Estimate gradient at x using central differences.
         """
-        grad = np.zeros(self.dim)
+        x = np.asarray(x, dtype=self.dtype)
+        grad = np.zeros(self.dim, dtype=self.dtype)
         
         for i in range(self.dim):
             x_fwd = x.copy()
             x_fwd[i] += self.step
-            z_fwd = self.fun(x_fwd)
+            z_fwd = self.dtype.type(self.fun(x_fwd))
             self.update(x_fwd, z_fwd)
             
             x_bwd = x.copy()
             x_bwd[i] -= self.step
-            z_bwd = self.fun(x_bwd)
+            z_bwd = self.dtype.type(self.fun(x_bwd))
             self.update(x_bwd, z_bwd)
             
-            grad[i] = (z_fwd - z_bwd) / (2 * self.step)
+            grad[i] = (z_fwd - z_bwd) / (self.dtype.type(2.0) * self.step)
             
         return grad
 

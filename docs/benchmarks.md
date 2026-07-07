@@ -45,7 +45,25 @@ From the repo root:
 python -m tests.benchmark_grad --config tests/config_benchmark_grad.yaml
 ```
 
-Results are saved to `results/` as `.mat` files.
+Each run creates a self-contained, timestamped folder under `results/`,
+named with the local start time (`YYYY-MM-DD HH-MM-SS`):
+
+```text
+results/2026-07-04 23-18-42/
+  config_benchmark_grad.yaml
+  log.txt
+  grad-bmk-...mat
+```
+
+- If a run directory for the same second already exists, a `_02`, `_03`, ...
+  suffix is appended; existing run directories are never overwritten.
+- The folder contains a raw, byte-preserving copy of the config file passed
+  via `--config`, and all `.mat` result files produced by that run.
+- `log.txt` mirrors stdout: benchmark output is printed live to the terminal
+  and simultaneously written to `log.txt` (stderr is not captured).
+- On a crash or exception, the partial run folder (including whatever config
+  copy, log, and `.mat` files were written so far) is intentionally left in
+  place rather than cleaned up.
 
 ## 5. Metrics
 
@@ -61,3 +79,30 @@ The `.mat` files include:
 - `rel_err`, `abs_err`, `cos_sim`, `max_err`: per-point metric arrays
 - `n_evals`: number of function evaluations per point
 - `aux_step_sizes_flat`, `aux_step_sizes_counts`: auxiliary step sizes (SAGE only)
+- `config_path`, `output_dir`, `run_timestamp`, `git_commit`: run metadata,
+  additive fields describing which config, run folder, and commit produced
+  the file (`git_commit` is `"unknown"` outside a git checkout)
+
+## 6. Plotting rel_err / cos_sim histograms
+
+`utils/plot_grad_results.py` reads a YAML settings file and, for each
+requested `(dim, problem, condnum, noise_type, noise_param)` combination,
+generates one PDF with stacked `rel_err` (log-scale, shared log bins) and
+`cos_sim` (shared linear bins) step histograms across the configured
+estimators, plus a `grad_hist_summary.csv` with per-estimator counts and
+quantiles.
+
+```bash
+python -m utils.plot_grad_results --options docs/config_plot_grad.yaml --dry-run
+python -m utils.plot_grad_results --options docs/config_plot_grad.yaml
+```
+
+See `docs/config_plot_grad.yaml` for a documented example (required fields:
+`source_dirs`, `dims`, `problems`, `condnums`, `noise_types`, `noise_params`,
+`estimators`). Matching is filename-based (works on files with or without
+the metadata fields above), duplicate matches raise an error listing all
+duplicate paths, and missing matches raise by default (`missing_policy:
+warn_skip` produces partial plots instead).
+
+`results_plot_grad.m` is an equivalent MATLAB script for interactive use
+(user-editable settings at the top, no YAML parsing needed).
