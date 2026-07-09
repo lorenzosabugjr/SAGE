@@ -29,10 +29,10 @@ Defaults are specified in `tests/config_benchmark_grad.yaml`:
 
 The benchmark supports the following gradient estimators (set `grad_bmk_estimators` in the YAML config):
 
-- `ffd` / `cfd`: Forward / Central Finite Differences, step size `1e-6`
-- `gsg` / `cgsg`: Gaussian Smoothing, `m = D`, `u = 1e-6`, `seed = problem_seed`
-- `nmxfd`: Normalized Mixed Finite Differences, default parameters in `estimators/finite_diff.py`
-- `sage`: SAGE with `quickmode=True`, `diam_mode="approx"`
+- `ffd` / `cfd`: Forward / Central Finite Differences, `step = gdtcalcstep`
+- `gsg` / `cgsg`: Gaussian Smoothing, `m = D`, `u = gdtcalcstep`, `seed = problem_seed`
+- `nmxfd`: Normalized Mixed Finite Differences, `sigma = gdtcalcstep`
+- `sage`: SAGE with `quickmode=True`, `diam_mode="approx"`, `init_step = gdtcalcstep`
 - `truth`: Analytical gradient (reference, not typically benchmarked)
 
 Factory functions in `tests/factories.py` instantiate problems and estimators by name.

@@ -8,7 +8,7 @@ list_condnum: [1.0e8]
 
 # Noise parameters (Unified: serves as bound for Uniform or sigma for Gaussian)
 # Original: [1.0, 1.0e-3, 0.0]
-list_noise_param: [0.0]
+list_noise_param: [1.0, 1.0e-3]
 
 # Noise types to sweep (options: "uniform", "gaussian")
 list_noise_type: ["uniform"]
@@ -23,9 +23,12 @@ list_problem:
 
 # Gradient Accuracy Benchmark Settings
 grad_bmk_dtype: "float128"     # dtype used for FFD/CFD benchmark points and stencil arithmetic
-gdtcalcstep: "1.0e-6"    # sqrt(epsilon) for FFD, keep as string so np.float128 parses the step directly
+gdtcalcstep: "1.0e-6"    # FFD/CFD step, GSG/CGSG radius, NMXFD sigma, SAGE initial step; string lets np.float128 parse it directly
 grad_bmk_npoints: 250         # Number of random test points per problem instance
 grad_bmk_nproblems: 100       # Number of random problem instances (randseeds 1..100)
 grad_bmk_estimators:           # Estimators to benchmark ("truth" is the reference, not listed here)
   - "ffd"
+  - "cfd"
   - "gsg"
+  - "cgsg"
+  - "nmxfd"

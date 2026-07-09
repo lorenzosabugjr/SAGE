@@ -20,7 +20,7 @@ noise_types: ["uniform"]
 noise_params: [0.0, 1.0e-3, 1.0]
 
 # Required: estimators to compare, plotted in this order.
-estimators: ["ffd", "cfd", "gsg", "cgsg", "nmxfd"]
+estimators: ["ffd", "cfd", "gsg", "cgsg", "nmxfd", "sage"]
 
 # Optional settings (defaults shown):
 

@@ -51,36 +51,25 @@ def create_estimator(
 ):
     """Instantiate a gradient estimator by name.
 
-    Supported names: "ffd", "ffd1.0", "cfd", "cfd1.0",
-    "gsg", "gsg1.0", "cgsg", "cgsg1.0",
-    "nmxfd", "nmxfd1.0", "sage", "truth".
+    Supported names: "ffd", "cfd", "gsg", "cgsg",
+    "nmxfd", "sage", "truth".
 
     Extra keyword arguments are forwarded to the SAGE constructor
     (e.g. ``quickmode``, ``diam_mode``, ``init_step``).
     """
     if name == "ffd":
         return FFDEstimator(obj_func, dims, step=gdtcalcstep, history=history, dtype=dtype)
-    elif name == "ffd1.0":
-        return FFDEstimator(obj_func, dims, step=1.0, history=history, dtype=dtype)
     elif name == "cfd":
         return CFDEstimator(obj_func, dims, step=gdtcalcstep, history=history, dtype=dtype)
-    elif name == "cfd1.0":
-        return CFDEstimator(obj_func, dims, step=1.0, history=history, dtype=dtype)
     elif name == "gsg":
         return GSGEstimator(obj_func, dims, m=dims, u=gdtcalcstep, seed=randseed, history=history)
-    elif name == "gsg1.0":
-        return GSGEstimator(obj_func, dims, m=dims, u=1.0, seed=randseed, history=history)
     elif name == "cgsg":
         return cGSGEstimator(obj_func, dims, m=dims, u=gdtcalcstep, seed=randseed, history=history)
-    elif name == "cgsg1.0":
-        return cGSGEstimator(obj_func, dims, m=dims, u=1.0, seed=randseed, history=history)
     elif name == "nmxfd":
-        return NMXFDEstimator(obj_func, dims, history=history)
-    elif name == "nmxfd1.0":
-        return NMXFDEstimator(obj_func, dims, sigma=0.5, history=history)
+        return NMXFDEstimator(obj_func, dims, sigma=gdtcalcstep, history=history)
     elif name == "sage":
         # Default SAGE settings; caller can override via sage_kwargs
-        kw = dict(quickmode=True, diam_mode="approx")
+        kw = dict(quickmode=True, diam_mode="approx", init_step=gdtcalcstep)
         kw.update(sage_kwargs)
         return SAGE(obj_func, dims, history=history, **kw)
     elif name == "truth":
