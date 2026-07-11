@@ -18,6 +18,7 @@ alongside a config snapshot and stdout log, and printed to console.
 import argparse
 import os
 import sys
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -48,6 +49,12 @@ def load_config(path: str) -> dict:
     _coerce_numeric_list(cfg, "list_noise_param", _coerce_float)
     _coerce_optional_scalar(cfg, "grad_bmk_npoints", _coerce_int)
     _coerce_optional_scalar(cfg, "grad_bmk_nproblems", _coerce_int)
+    cfg.setdefault("sage_noise_bound_mode", "estimate")
+    if cfg["sage_noise_bound_mode"] not in ("estimate", "known"):
+        raise ValueError(
+            "sage_noise_bound_mode must be 'estimate' or 'known', "
+            f"got {cfg['sage_noise_bound_mode']!r}"
+        )
     return cfg
 
 
@@ -149,6 +156,7 @@ def _run_gradient_benchmark(config_path: str, output_dir: Path, metadata: dict):
     GRAD_BMK_ESTIMATORS = cfg["grad_bmk_estimators"]
     GRAD_BMK_DTYPE = np.dtype(cfg.get("grad_bmk_dtype", "float128"))
     GRAD_BMK_STEP = GRAD_BMK_DTYPE.type(cfg.get("gdtcalcstep", "1e-6"))
+    SAGE_NOISE_BOUND_MODE = cfg["sage_noise_bound_mode"]
 
     output_dir = Path(output_dir)
 
@@ -193,6 +201,29 @@ def _run_gradient_benchmark(config_path: str, output_dir: Path, metadata: dict):
                         )
                         print("=" * 60)
 
+                        # SAGE noise_bound kwarg for this (noise_type, noise_param)
+                        # combo, computed once per combo rather than per point.
+                        sage_extra_kwargs = {}
+                        if SAGE_NOISE_BOUND_MODE == "known":
+                            if bmk_noise_type == "uniform":
+                                # utils/noise.py draws uniform noise from
+                                # [-bmk_noise/2, bmk_noise/2], so the true bound
+                                # (max |noise|) is half the configured interval
+                                # width, not the width itself.
+                                sage_extra_kwargs["noise_bound"] = bmk_noise / 2.0
+                            else:
+                                # Gaussian noise has no hard bound; bmk_noise is a
+                                # standard deviation, not an interval width, so
+                                # "known" mode is not well-defined here. Warn and
+                                # fall back to estimate-mode behavior (no
+                                # noise_bound kwarg) for this run.
+                                warnings.warn(
+                                    "sage_noise_bound_mode='known' is not "
+                                    "well-defined for Gaussian noise (no hard "
+                                    "bound); falling back to estimate mode for "
+                                    f"this run (noise={bmk_noise})."
+                                )
+
                         for est_name in GRAD_BMK_ESTIMATORS:
                             is_sage = (est_name == "sage")
 
@@ -234,12 +265,15 @@ def _run_gradient_benchmark(config_path: str, output_dir: Path, metadata: dict):
                                         _hist.add(x, val)
                                         return val
 
+                                    extra_kwargs = sage_extra_kwargs if is_sage else {}
+
                                     try:
                                         estimator = create_estimator(
                                             est_name, obj_func, bmk_D, history,
                                             gdtcalcstep=GRAD_BMK_STEP,
                                             randseed=pi + 1,
                                             dtype=GRAD_BMK_DTYPE,
+                                            **extra_kwargs,
                                         )
                                     except Exception as e:
                                         if pi == 0 and j == 0:

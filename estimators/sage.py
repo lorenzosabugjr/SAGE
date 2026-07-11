@@ -37,6 +37,7 @@ class SAGE(BaseGradientEstimator):
         callback: Optional[Callable[[], None]] = None,
         init_step: float = 1e-6,
         reset_on_step: bool = False,
+        noise_bound: Optional[float] = None,
     ):
         """
         Initialize the SAGE estimator.
@@ -50,12 +51,29 @@ class SAGE(BaseGradientEstimator):
             diam_mode: "exact" or "approx". Defaults to "approx" when quickmode is True.
             callback: Optional callback invoked after each auxiliary evaluation.
             init_step: Step size used to seed a CFD-like stencil when history has 0 or 1 samples.
+            noise_bound: Optional a priori bound on the noise magnitude. If None
+                (default), SAGE estimates the noise bound from data as before. If a
+                finite value >= 0 is given, SAGE fixes the noise bound and removes
+                the noise-bound decision variable from the LP.
         """
+        if noise_bound is not None:
+            if not np.isfinite(noise_bound) or noise_bound < 0.0:
+                raise ValueError(
+                    f"noise_bound must be None or a finite value >= 0, got {noise_bound!r}"
+                )
+            noise_bound = float(noise_bound)
+
         super().__init__(fun, dim, history=history)
         self.quickmode = quickmode
         self.callback = callback
         self.init_step = init_step
+        # Step size actually used by the last singleton CFD seed stencil;
+        # compared against alpha to decide whether a noise re-stencil is
+        # redundant (see _maybe_noise_reseed).
+        self._seed_step = init_step
         self.reset_on_step = reset_on_step
+        self.noise_bound = noise_bound
+        self.noise_bound_is_fixed = noise_bound is not None
         if diam_mode is None:
             self.diam_mode = "approx" if quickmode else "exact"
         else:
@@ -74,8 +92,8 @@ class SAGE(BaseGradientEstimator):
         self.gdtset_diaid = 0.05   # Ideal gradient set diameter
         self.gdtset_diath = 0.05   # Current threshold
         
-        # Noise bound is estimated by the LP; initialize to zero.
-        self.ns_est = 0.0
+        # Noise bound is estimated by the LP unless a fixed bound is supplied.
+        self.ns_est = self.noise_bound if self.noise_bound_is_fixed else 0.0
         
         self.gdt_est = np.zeros(dim)
         self.hess_norm = 0.0
@@ -87,6 +105,11 @@ class SAGE(BaseGradientEstimator):
         self.b2 = None
         self.gd_v = np.nan
         self.gd_vm = np.inf
+        # Axis-aligned bounding-box bounds of the gradient consistency set,
+        # populated by _calc_diam_approx (reused for the point estimate) or
+        # left None when diam_mode == "exact" / unavailable.
+        self.min_g = None
+        self.max_g = None
         
         self.gdt_est_frc = False
         self.hist_aux_samples = np.empty((0,))
@@ -95,7 +118,6 @@ class SAGE(BaseGradientEstimator):
         self._last_update_n = None
         self._last_update_x = None
         self.x_current = None
-        self._pending_aux_feedback = None
         self._axis_probe_queue = []
 
         # Tracking aux samples for the current estimation step
@@ -105,11 +127,20 @@ class SAGE(BaseGradientEstimator):
         self._did_noise_reseed = False
         self._prev_gdt_est = None
         self._stable_count = 0
+        # Stability of the *final* (box-centered/projected) point estimate,
+        # as opposed to _stable_count above which tracks the raw LP vertex.
+        # Used as an early-stop signal (see _should_stop_refinement) since
+        # the box-centered estimate is far less solver-path-dependent than
+        # the raw vertex the old (removed) stagnation branch tracked.
+        self._prev_gdt_est_final = None
+        self._stable_count_final = 0
 
-        # Active-sampling feedback thresholds
-        self._directional_contraction_ratio_max = 0.95
-        self._directional_alignment_tol = 0.995
-        self.aux_log = []
+        # Adaptive auxiliary sampling radius: geometric growth factor applied
+        # on top of the modeled alpha once every axis has been probed at the
+        # current radius and the box is still not tight enough. Reset per
+        # query in _reset_query_state so it never leaks across calls.
+        self._aux_radius_growth = 1.0
+        self._aux_radius_growth_factor = 2.0
 
         # ── Diagnostic counters ──
         self._diag_lp_count = 0          # total LP solves
@@ -150,6 +181,7 @@ class SAGE(BaseGradientEstimator):
         # accuracy; in the noisy case the adaptive refinement loop will
         # detect the large diameter and sample farther automatically.
         h = self.init_step
+        self._seed_step = h
         for i in range(self.dim):
             e_i = np.zeros(self.dim)
             e_i[i] = 1.0
@@ -157,15 +189,16 @@ class SAGE(BaseGradientEstimator):
             self._eval_and_record(x - h * e_i)
 
     def _reset_query_state(self) -> None:
-        self.aux_log = []
         self.aux_step_sizes_current = np.empty((0,))
-        self._pending_aux_feedback = None
         self._axis_probe_queue = []
         self._used_probe_axes = set()
         self.aux_samples_count = 0
         self._prev_gdt_est = None
         self._stable_count = 0
+        self._prev_gdt_est_final = None
+        self._stable_count_final = 0
         self._did_noise_reseed = False
+        self._aux_radius_growth = 1.0
         # Reset per-iterate Hessian norm: H is local to each iterate, so it
         # should not carry over when jumping to a new query point.
         # In contrast, hess_lipsc (γ) is a global Lipschitz constant and
@@ -198,6 +231,21 @@ class SAGE(BaseGradientEstimator):
         _diam_t0 = time.perf_counter()
         self._calc_diam()
         _diam_dt = time.perf_counter() - _diam_t0
+        self._update_point_estimate()
+
+        # Track stability of the *final* point estimate (box-centered/
+        # projected), separately from the raw-vertex _stable_count tracked
+        # inside _grad_est_lp. This is what _should_stop_refinement's
+        # stagnation branch uses.
+        if self._prev_gdt_est_final is not None:
+            g_norm = max(norm(self.gdt_est), 1e-30)
+            change = norm(self.gdt_est - self._prev_gdt_est_final) / g_norm
+            if change < 0.02:
+                self._stable_count_final += 1
+            else:
+                self._stable_count_final = 0
+        self._prev_gdt_est_final = np.array(self.gdt_est, copy=True)
+
         if self._diag_enabled and (_lp_dt > 1.0 or _diam_dt > 1.0):
             print(
                 f"[SAGE-RECOMPUTE] lp_t={_lp_dt:.4f}s  diam_t={_diam_dt:.4f}s  "
@@ -240,34 +288,42 @@ class SAGE(BaseGradientEstimator):
         coll_x   = [self.Xn[j] for j in range(self.Zn.size) if j not in x_idx]
         coll_idx_raw = [j for j in range(self.Zn.size) if j not in x_idx]
 
-        # Compute optimal sampling radius for neighbor selection
-        aa = 1 / 3 * self.hess_lipsc
-        bb = 1 / 2 * self.hess_norm
-        dd = -2 * self.ns_est
-        rt = np.roots([aa, bb, 0, dd])
-        alpha_roots = rt[np.isreal(rt) & (rt.real >= 0)]
-        if alpha_roots.size == 0:
-            alpha = 2.0 * np.sqrt(max(self.ns_est, 1e-30))
-        else:
-            alpha = float(alpha_roots.real[0])
+        # Compute optimal sampling radius for neighbor selection. Growth
+        # applies only when alpha* is still the unresolved-curvature
+        # fallback (see _model_alpha) -- once the cubic resolves a real
+        # root, alpha* is already the correct radius for the
+        # currently-estimated H_i/gamma_H, and multiplying it by a stale
+        # growth factor would reintroduce the runaway-radius hazard
+        # _model_alpha's docstring describes.
+        alpha, resolved = self._model_alpha()
+
+        # Neighbor selection tracks the radius aux samples are actually
+        # being placed at (alpha scaled by any axis-exhaustion-driven growth
+        # from _next_aux_direction), not just the un-grown model alpha.
+        # Otherwise growth pushes new samples further out while the band
+        # filter/quickmode ranking keep re-anchoring on the stale un-grown
+        # alpha, discarding exactly the far samples growth was trying to
+        # create -- H_i/gamma_H then can never resolve nonzero from that
+        # evidence, no matter how far growth pushes.
+        search_alpha = alpha if resolved else alpha * self._aux_radius_growth
 
         # Distance band filter: when noise is detected, exclude samples
-        # whose distance from x is so far from alpha that their LP
+        # whose distance from x is so far from search_alpha that their LP
         # constraints are noise-dominated (too close) or curvature-
         # dominated (too far).  This prevents tiny-step seed samples
         # from poisoning the LP with enormous slab widths.
         if self.ns_est > 1e-9 and len(coll_x) > 0:
             coll_dists = np.array([norm(cx - x) for cx in coll_x])
-            band_lo = alpha / 10.0
-            band_hi = alpha * 10.0
+            band_lo = search_alpha / 10.0
+            band_hi = search_alpha * 10.0
             in_band = (coll_dists >= band_lo) & (coll_dists <= band_hi)
             if np.sum(in_band) >= D + 1:
                 coll_x = [coll_x[j] for j in range(len(coll_x)) if in_band[j]]
                 coll_idx_raw = [coll_idx_raw[j] for j in range(len(coll_idx_raw)) if in_band[j]]
 
-        # Quickmode: keep at most 5D nearest-to-alpha samples
+        # Quickmode: keep at most 5D nearest-to-search_alpha samples
         if len(coll_x) > 5*D and self.quickmode:
-            cost_fn = np.abs(np.sum((np.array(coll_x) - x)**2, axis=1) - alpha**2)
+            cost_fn = np.abs(np.sum((np.array(coll_x) - x)**2, axis=1) - search_alpha**2)
             sort_idx = np.argsort(cost_fn)[:5*D]
             coll_idx = [coll_idx_raw[j] for j in sort_idx]
         else:
@@ -279,6 +335,7 @@ class SAGE(BaseGradientEstimator):
             print(
                 f"[LP-DIAG] call#{self._diag_call_count}  "
                 f"n_samples={len(coll_idx)}  alpha={alpha:.4e}  "
+                f"search_alpha={search_alpha:.4e}  growth={self._aux_radius_growth:.4e}  "
                 f"hess_lipsc_in={self.hess_lipsc:.4e}  "
                 f"hess_norm_in={self.hess_norm:.4e}  ns_in={self.ns_est:.4e}  "
                 f"d_min={dists.min():.4e}  d_max={dists.max():.4e}  "
@@ -309,14 +366,25 @@ class SAGE(BaseGradientEstimator):
         b = np.asarray(rhs, dtype=float).reshape(-1, 1)
 
         # 4. Solve LP
-        nonneg_rows = np.zeros((3, A.shape[1]))
-        nonneg_rows[0, -3] = -1.0
-        nonneg_rows[1, -2] = -1.0
-        nonneg_rows[2, -1] = -1.0
-        Ae = np.vstack((A, nonneg_rows))
-        be = np.concatenate((b.ravel(), np.zeros(3)))
-        
-        c = np.hstack((np.zeros(Ae.shape[1] - 3), 1, 1, 1))
+        # Estimated mode keeps the full [g, H, gamma, eps] LP. Fixed mode
+        # drops the eps decision variable and folds its known contribution
+        # (the eps column is always -2/dij) into the RHS instead.
+        if self.noise_bound_is_fixed:
+            A_lp = A[:, : D + 2]
+            b_lp = b.flatten() - A[:, D + 2] * self.noise_bound
+            n_nonneg = 2
+        else:
+            A_lp = A
+            b_lp = b.flatten()
+            n_nonneg = 3
+
+        nonneg_rows = np.zeros((n_nonneg, A_lp.shape[1]))
+        for i in range(n_nonneg):
+            nonneg_rows[i, A_lp.shape[1] - n_nonneg + i] = -1.0
+        Ae = np.vstack((A_lp, nonneg_rows))
+        be = np.concatenate((b_lp, np.zeros(n_nonneg)))
+
+        c = np.hstack((np.zeros(Ae.shape[1] - n_nonneg), np.ones(n_nonneg)))
         _lp_t0 = time.perf_counter()
         res = cp.optimize.linprog(
             c,
@@ -328,12 +396,18 @@ class SAGE(BaseGradientEstimator):
         _lp_dt = time.perf_counter() - _lp_t0
         self._diag_lp_count += 1
         self._diag_lp_time += _lp_dt
-        
+
         if res.success:
-            self.gdt_est = res.x[:-3]
-            self.hess_norm = np.max([res.x[-3], self.hess_norm])
-            self.hess_lipsc = np.max([res.x[-2], self.hess_lipsc])
-            self.ns_est = res.x[-1]
+            if self.noise_bound_is_fixed:
+                self.gdt_est = res.x[:-2]
+                self.hess_norm = np.max([res.x[-2], self.hess_norm])
+                self.hess_lipsc = np.max([res.x[-1], self.hess_lipsc])
+                # ns_est stays fixed at self.noise_bound; not overwritten.
+            else:
+                self.gdt_est = res.x[:-3]
+                self.hess_norm = np.max([res.x[-3], self.hess_norm])
+                self.hess_lipsc = np.max([res.x[-2], self.hess_lipsc])
+                self.ns_est = res.x[-1]
 
             if self._diag_enabled:
                 print(
@@ -359,6 +433,12 @@ class SAGE(BaseGradientEstimator):
                     f"[LP-RESULT] call#{self._diag_call_count}  "
                     f"LP FAILED  status={res.status}  msg={res.message}",
                     flush=True,
+                )
+            if self.noise_bound_is_fixed:
+                raise RuntimeError(
+                    "SAGE fixed-noise-bound LP did not solve successfully "
+                    f"(status={res.status!r}, message={res.message!r}, "
+                    f"noise_bound={self.noise_bound!r})"
                 )
 
         # 5. Construct Gradient Set Polytopes (A2, b2)
@@ -391,27 +471,6 @@ class SAGE(BaseGradientEstimator):
             self.A2 = None
             self.b2 = None
 
-    def _current_diameter_direction(self) -> Optional[np.ndarray]:
-        if np.ndim(self.gd_v) != 1 or len(self.gd_v) != self.dim:
-            return None
-        v = np.array(self.gd_v, dtype=float)
-        # Replace inf entries with a large finite value so the direction
-        # points toward unbounded axes (the ones most in need of probing).
-        inf_mask = ~np.isfinite(v)
-        if np.all(inf_mask):
-            # All axes unbounded — pick the first one
-            v = np.zeros(self.dim)
-            v[0] = 1.0
-            return v
-        if np.any(inf_mask):
-            v[inf_mask] = 10.0 * np.max(np.abs(v[~inf_mask]))
-            if np.max(np.abs(v)) < 1e-30:
-                v[inf_mask] = 1.0
-        n = norm(v)
-        if n < 1e-30:
-            return None
-        return v / n
-
     def _solve_direction_bound(self, direction: np.ndarray, maximize: bool) -> float:
         c = -direction if maximize else direction
         _lp_t0 = time.perf_counter()
@@ -432,81 +491,48 @@ class SAGE(BaseGradientEstimator):
             return np.inf if maximize else -np.inf
         return float(-res.fun if maximize else res.fun)
 
-    def _directional_width(self, direction: Optional[np.ndarray]) -> float:
-        if direction is None or self.Al is None or self.bl is None or self.Al.size == 0:
-            return np.inf
+    def _model_alpha(self) -> tuple[float, bool]:
+        """Un-grown optimal-radius estimate alpha* (theory.md Sec. 5) and
+        whether it was resolved from a real positive root of the cubic
+        (True) or is the unit-Hessian-norm bootstrap fallback (False).
 
-        direction = np.asarray(direction, dtype=float).reshape(-1)
-        max_val = self._solve_direction_bound(direction, maximize=True)
-        min_val = self._solve_direction_bound(direction, maximize=False)
-        if not np.isfinite(max_val) or not np.isfinite(min_val):
-            return np.inf
-        return max(0.0, max_val - min_val)
-
-    def _record_aux_feedback(
-        self,
-        pending: dict,
-        prev_width: float,
-        new_width: float,
-        width_ratio: float,
-        dir_cosine: float,
-        informative: bool,
-        needs_growth: bool,
-    ) -> None:
-        self.aux_log.append({
-            "alpha_model": float(pending["alpha_model"]),
-            "alpha_used": float(pending["alpha_used"]),
-            "direction_source": pending["direction_source"],
-            "axis_queue_len": int(len(self._axis_probe_queue)),
-            "width_before": prev_width,
-            "width_after": new_width,
-            "width_ratio": width_ratio,
-            "dir_cosine": dir_cosine,
-            "informative": bool(informative),
-            "needs_growth": bool(needs_growth),
-        })
+        Radius growth (see _next_aux_direction) must apply only in the
+        unresolved case. Once the cubic resolves a real root, alpha* is
+        already the correct bias/variance-optimal radius for the
+        currently-estimated H_i/gamma_H; multiplying it by a growth factor
+        accumulated during an earlier unresolved period can produce a
+        wildly oversized radius, since the cube root is highly sensitive
+        near H_i = gamma_H = 0 (a barely-resolved, near-noise curvature
+        estimate can imply an alpha* many times larger than the radius that
+        just resolved it).
+        """
+        aa = 1 / 3 * self.hess_lipsc
+        bb = 1 / 2 * self.hess_norm
+        dd = -2 * self.ns_est
+        rt = np.roots([aa, bb, 0, dd])
+        roots = rt[np.isreal(rt) & (rt.real >= 0)]
+        if roots.size > 0:
+            return float(roots.real[0]), True
+        return 2.0 * np.sqrt(max(self.ns_est, 1e-30)), False
 
     def _compute_aux_step(self) -> tuple[float, float]:
         if self.ns_est <= 1e-9:
             model_alpha = self.init_step
             self.gdtset_diath = self.gdtset_diaid
-        else:
-            aa = 1 / 3 * self.hess_lipsc
-            bb = 1 / 2 * self.hess_norm
-            dd = -2 * self.ns_est
-            rt = np.roots([aa, bb, 0, dd])
-            roots = rt[np.isreal(rt) & (rt.real >= 0)]
-            if len(roots) > 0:
-                model_alpha = float(roots.real[0])
-            else:
-                # Curvature unresolvable from current samples (H ≈ 0, γ ≈ 0
-                # but noise detected).  Use the optimal-α formula assuming
-                # unit Hessian norm as bootstrap: α ≈ 2√ε.  Once the LP can
-                # resolve curvature at this distance, the cubic takes over.
-                model_alpha = 2.0 * np.sqrt(max(self.ns_est, 1e-30))
-            self.gdtset_diath = 1.01 * model_alpha
+            alpha = model_alpha * self._aux_radius_growth
+            return alpha, float(model_alpha)
 
-        return model_alpha, float(model_alpha)
+        model_alpha, resolved = self._model_alpha()
+        self.gdtset_diath = 1.01 * model_alpha
 
-    def _queue_aux_feedback(
-        self,
-        direction: np.ndarray,
-        alpha_used: float,
-        alpha_model: float,
-        direction_source: str,
-    ) -> None:
-        self._pending_aux_feedback = {
-            "direction": np.array(direction, copy=True),
-            "alpha_used": float(alpha_used),
-            "alpha_model": float(alpha_model),
-            "direction_source": direction_source,
-            "width_before": float(self._directional_width(direction)),
-        }
+        # Axis-exhaustion-driven radius growth (see _next_aux_direction):
+        # scales the step actually used without altering the modeled alpha
+        # that gdtset_diath is derived from -- but only while alpha* is
+        # still unresolved (see _model_alpha).
+        alpha = model_alpha if resolved else model_alpha * self._aux_radius_growth
+        return alpha, float(model_alpha)
 
-    def _select_probe_axis(
-        self,
-        reference_direction: Optional[np.ndarray],
-    ) -> Optional[int]:
+    def _select_probe_axis(self) -> Optional[int]:
         if np.ndim(self.gd_v) != 1:
             return None
 
@@ -515,26 +541,18 @@ class SAGE(BaseGradientEstimator):
             return None
 
         order = np.argsort(-widths)
-        ref = None if reference_direction is None else np.asarray(reference_direction, dtype=float).reshape(-1)
-
         for axis in order:
             if widths[axis] <= 0.0 or int(axis) in self._used_probe_axes:
                 continue
-            if ref is not None and np.abs(ref[axis]) >= self._directional_alignment_tol:
-                continue
-
             return int(axis)
 
         return None
 
-    def _enqueue_axis_probe_pair(
-        self,
-        reference_direction: Optional[np.ndarray],
-    ) -> bool:
+    def _enqueue_axis_probe_pair(self) -> bool:
         if self._axis_probe_queue:
             return True
 
-        axis = self._select_probe_axis(reference_direction)
+        axis = self._select_probe_axis()
         if axis is None:
             return False
 
@@ -546,76 +564,57 @@ class SAGE(BaseGradientEstimator):
         self._used_probe_axes.add(int(axis))
         return True
 
-    def _next_aux_direction(self) -> tuple[Optional[np.ndarray], str]:
+    def _next_aux_direction(self) -> Optional[np.ndarray]:
         if self._axis_probe_queue:
-            return self._axis_probe_queue.pop(0), "axis"
+            return self._axis_probe_queue.pop(0)
+        if self._enqueue_axis_probe_pair():
+            return self._axis_probe_queue.pop(0)
 
-        return self._current_diameter_direction(), "diameter"
-
-    def _consume_aux_feedback(self) -> None:
-        if self._pending_aux_feedback is None:
-            return
-
-        pending = self._pending_aux_feedback
-        self._pending_aux_feedback = None
-
-        prev_dir = pending["direction"]
-        prev_width = float(pending["width_before"])
-        new_dir = self._current_diameter_direction()
-        new_width = float(self._directional_width(prev_dir))
-
-        if new_dir is None:
-            dir_cosine = np.nan
-        else:
-            dir_cosine = float(np.clip(np.abs(prev_dir @ new_dir), 0.0, 1.0))
-
-        if np.isfinite(prev_width) and prev_width > 1e-30 and np.isfinite(new_width):
-            width_ratio = float(new_width / prev_width)
-        else:
-            width_ratio = np.nan
-
-        contracted = np.isfinite(width_ratio) and width_ratio <= self._directional_contraction_ratio_max
-        rotated = (
-            np.isfinite(dir_cosine)
-            and dir_cosine < self._directional_alignment_tol
-            and np.isfinite(new_width)
-            and (not np.isfinite(prev_width) or new_width <= prev_width)
-        )
-        informative = contracted or rotated
-        needs_growth = (
-            np.isfinite(width_ratio) and width_ratio > self._directional_contraction_ratio_max
-            and (not np.isfinite(dir_cosine) or dir_cosine >= self._directional_alignment_tol)
-        )
-        # If width is still infinite, we definitely need axis probes —
-        # the diameter direction probe didn't bound the axis at all.
-        if not np.isfinite(new_width):
-            needs_growth = True
-
-        # If the diameter direction didn't contract, try axis-aligned probes
-        # to reduce uncertainty along the widest coordinate axes.
-        if needs_growth and not informative:
-            self._enqueue_axis_probe_pair(prev_dir)
-
-        self._record_aux_feedback(
-            pending,
-            prev_width,
-            new_width,
-            width_ratio,
-            dir_cosine,
-            informative,
-            needs_growth,
-        )
+        # Every axis has been probed at the current radius and the box is
+        # still not tight enough: grow the radius and restart a fresh sweep
+        # over all axes. (Diameter-direction probes were removed entirely --
+        # in approx/box diam_mode, gd_v is elementwise non-negative, so the
+        # "diameter direction" was always the same fixed all-positive-orthant
+        # diagonal; a diagonal cut leaves every axis-aligned bound unchanged,
+        # so those probes could never inform the box metric or the box-center
+        # point estimate, only burn budget. Verified: axis-only refinement
+        # beat the old diameter+axis alternation on every point of the
+        # diagnostic benchmark, at equal budget.)
+        self._aux_radius_growth *= self._aux_radius_growth_factor
+        self._used_probe_axes.clear()
+        if self._diag_enabled:
+            print(
+                f"[SAGE-PHASE] call#{self._diag_call_count} "
+                f"aux radius growth  factor={self._aux_radius_growth:.4e}",
+                flush=True,
+            )
+        if self._enqueue_axis_probe_pair():
+            return self._axis_probe_queue.pop(0)
+        return None
 
     def _should_stop_refinement(self) -> bool:
         pending_axis_pair = bool(self._axis_probe_queue)
-        # Stagnation: gradient estimate hasn't changed by >2% for several
-        # consecutive LP solves.  Further sampling is unlikely to help.
-        stagnated = self._stable_count >= 3 and not pending_axis_pair
+        # _stable_count (LP-vertex stability across consecutive solves) is
+        # still tracked in _grad_est_lp as a diagnostic signal but does not
+        # gate stopping: an unmoving raw LP vertex does not imply the
+        # actual gradient-set diameter has shrunk, only that the
+        # (possibly-arbitrary) vertex the solver picked stopped moving.
+        #
+        # _stable_count_final tracks the *box-centered/projected* estimate
+        # instead (see _recompute_at) -- a far less solver-path-dependent
+        # quantity now that the Milestone-3 point-estimate fix is in place.
+        # Reinstated as a stopping condition: gdtset_diath is derived from
+        # H_i/gamma_H estimates that are themselves often stuck at a
+        # degenerate fallback, or that jump discontinuously the moment
+        # curvature resolves -- making "diameter below threshold" an
+        # unreliable, moving target to chase all the way to the aux
+        # sample cap. Stopping once the reported estimate has genuinely
+        # settled avoids spending the full budget chasing that target.
         return (
             (self.gd_vm < self.gdtset_diath and not pending_axis_pair)
             or self.gdt_est_frc
-            or stagnated
             or (self.aux_samples_count >= 5.0 * self.dim and not pending_axis_pair)
+            or (self._stable_count_final >= 3 and not pending_axis_pair)
         )
 
     def _finish_refinement(self) -> None:
@@ -624,14 +623,13 @@ class SAGE(BaseGradientEstimator):
         self.gdt_est_frc = False
 
     def _prepare_aux_sample(self, x: np.ndarray) -> Optional[np.ndarray]:
-        alpha, model_alpha = self._compute_aux_step()
-        direction, direction_source = self._next_aux_direction()
+        alpha, _ = self._compute_aux_step()
+        direction = self._next_aux_direction()
         if direction is None:
             return None
 
         x_new = x + alpha * direction
         self.aux_step_sizes_current = np.hstack((self.aux_step_sizes_current, float(alpha)))
-        self._queue_aux_feedback(direction, alpha, model_alpha, direction_source)
         self.aux_samples_count += 1
         return x_new
 
@@ -654,6 +652,10 @@ class SAGE(BaseGradientEstimator):
             float: The diameter of the set (scalar).
         """
         D = self.dim
+        # Exact mode does not compute per-axis bounds as a byproduct, so the
+        # point estimate must fall back to computing its own bounding box.
+        self.min_g = None
+        self.max_g = None
         if self.A2 is None:
             return np.inf
 
@@ -690,6 +692,8 @@ class SAGE(BaseGradientEstimator):
         """
         D = self.dim
         if self.Al is None or self.bl is None or self.Al.size == 0:
+            self.min_g = None
+            self.max_g = None
             return np.inf
 
         max_g = np.empty(D)
@@ -700,6 +704,11 @@ class SAGE(BaseGradientEstimator):
             direction[i] = 1.0
             max_g[i] = self._solve_direction_bound(direction, maximize=True)
             min_g[i] = self._solve_direction_bound(direction, maximize=False)
+
+        # Stored so _update_point_estimate can reuse these per-axis solves
+        # for the bounding-box center instead of re-solving them.
+        self.min_g = min_g
+        self.max_g = max_g
 
         self.gd_v = max_g - min_g
         # Guard against nan from inf - (-inf) or similar edge cases
@@ -725,6 +734,67 @@ class SAGE(BaseGradientEstimator):
             )
 
         return self.gd_vm
+
+    def _update_point_estimate(self) -> None:
+        """Replace the raw LP-solved vertex in self.gdt_est with a
+        representative point: the center of the axis-aligned bounding box of
+        the gradient consistency set (self.Al, self.bl), or its projection
+        onto the polytope if the box center itself is infeasible.
+
+        The LP objective never costs g itself, so once noise makes H/gamma
+        (and eps, in estimated mode) LP-feasible at zero, any g inside the
+        polytope is equally optimal and the raw vertex returned by the
+        solver is solver-path-dependent and potentially meaningless (often
+        the exact zero vector). The box center is a much more representative
+        summary of the consistency set.
+
+        Works off Al/bl directly so it applies regardless of diam_mode:
+        reuses the per-axis bounds already solved by _calc_diam_approx when
+        available, and falls back to solving them here (e.g. diam_mode ==
+        "exact") otherwise.
+        """
+        if self.Al is None or self.bl is None or self.Al.size == 0:
+            return
+
+        D = self.dim
+        if self.min_g is not None and self.max_g is not None:
+            min_g, max_g = self.min_g, self.max_g
+        else:
+            min_g = np.empty(D)
+            max_g = np.empty(D)
+            for i in range(D):
+                direction = np.zeros(D)
+                direction[i] = 1.0
+                max_g[i] = self._solve_direction_bound(direction, maximize=True)
+                min_g[i] = self._solve_direction_bound(direction, maximize=False)
+
+        if not (np.all(np.isfinite(min_g)) and np.all(np.isfinite(max_g))):
+            # Box is unbounded along some axis; no well-defined center to
+            # project toward, so keep the raw LP vertex.
+            return
+
+        g_box = 0.5 * (max_g + min_g)
+
+        tol = 1e-9
+        slack = self.bl - self.Al @ g_box
+        if np.all(slack >= -tol):
+            self.gdt_est = g_box
+            return
+
+        # Box center is infeasible: segment-clip from the raw LP-solved
+        # vertex (guaranteed feasible) toward the box center, stopping at
+        # the first constraint boundary crossed.
+        g_v = np.asarray(self.gdt_est, dtype=float)
+        delta = g_box - g_v
+        Ad = self.Al @ delta
+        Av = self.Al @ g_v
+        active = Ad > tol
+        if not np.any(active):
+            return
+
+        t_star = min(1.0, float(np.min((self.bl[active] - Av[active]) / Ad[active])))
+        t_star = max(0.0, t_star)
+        self.gdt_est = g_v + t_star * delta
 
     def _reseed_at_alpha(self, x: np.ndarray, alpha: float) -> None:
         """Add a symmetric coordinate stencil at distance *alpha* from *x*.
@@ -752,6 +822,50 @@ class SAGE(BaseGradientEstimator):
         if len(roots) > 0:
             return float(roots.real[0])
         return 2.0 * np.sqrt(max(self.ns_est, 1e-30))
+
+    def _maybe_noise_reseed(self, x: np.ndarray) -> None:
+        """Noise-aware re-stencil, skipped when the existing seed is already
+        well-placed.
+
+        If the first LP detected noise, the tiny-step seed stencil is
+        normally uninformative, so a full coordinate stencil is placed at
+        the noise-appropriate distance (alpha) so the band filter can
+        exclude the seed and the LP gets well-conditioned constraints from
+        the start. But if the seed stencil (placed at self._seed_step) is
+        already within a band around alpha, it is already appropriately
+        placed and re-stenciling would just double the evaluation floor for
+        no benefit.
+        """
+        if not (self.ns_est > 1e-9 and not self._did_noise_reseed):
+            return
+
+        self._did_noise_reseed = True
+        alpha = self._get_aux_alpha()
+
+        band_lo = alpha / 2.0
+        band_hi = alpha * 2.0
+        in_band = self._seed_step is not None and band_lo <= self._seed_step <= band_hi
+
+        if self._diag_enabled:
+            print(
+                f"[SAGE-PHASE] call#{self._diag_call_count} "
+                f"noise reseed check  ns={self.ns_est:.4e}  alpha={alpha:.4e}  "
+                f"seed_step={self._seed_step}  in_band={in_band}",
+                flush=True,
+            )
+
+        if in_band:
+            return
+
+        self._reseed_at_alpha(x, alpha)
+        self._recompute_at(x)
+        if self._diag_enabled:
+            print(
+                f"[SAGE-PHASE] call#{self._diag_call_count} "
+                f"noise reseed done  hist={self.history.Zn.size}  "
+                f"diam={self.gd_vm:.4e}",
+                flush=True,
+            )
 
     def _probe_then_batch_inf_axes(self, x: np.ndarray) -> bool:
         """Probe-then-batch: quickly cover all unbounded gradient axes.
@@ -873,7 +987,7 @@ class SAGE(BaseGradientEstimator):
             self.gd_v = np.nan
             self.gd_vm = np.inf
             self.hess_norm = 0.0
-            self.ns_est = 0.0
+            self.ns_est = self.noise_bound if self.noise_bound_is_fixed else 0.0
 
         sample_added = self._ensure_query_sample(x)
 
@@ -904,35 +1018,9 @@ class SAGE(BaseGradientEstimator):
             self.x_current = x
 
         # Noise-aware re-stencil: if the first LP detected noise, the tiny-step
-        # seed is uninformative.  Immediately place a full coordinate stencil at
-        # the noise-appropriate distance so the band filter can exclude the seed
-        # and the LP gets well-conditioned constraints from the start.
-        if self.ns_est > 1e-9 and not self._did_noise_reseed:
-            self._did_noise_reseed = True
-            if self._diag_enabled:
-                print(
-                    f"[SAGE-PHASE] call#{self._diag_call_count} "
-                    f"noise reseed triggered  ns={self.ns_est:.4e}",
-                    flush=True,
-                )
-            aa = 1 / 3 * self.hess_lipsc
-            bb = 1 / 2 * self.hess_norm
-            dd = -2 * self.ns_est
-            rt = np.roots([aa, bb, 0, dd])
-            roots = rt[np.isreal(rt) & (rt.real >= 0)]
-            if len(roots) > 0:
-                alpha = float(roots.real[0])
-            else:
-                alpha = 2.0 * np.sqrt(max(self.ns_est, 1e-30))
-            self._reseed_at_alpha(x, alpha)
-            self._recompute_at(x)
-            if self._diag_enabled:
-                print(
-                    f"[SAGE-PHASE] call#{self._diag_call_count} "
-                    f"noise reseed done  hist={self.history.Zn.size}  "
-                    f"diam={self.gd_vm:.4e}",
-                    flush=True,
-                )
+        # seed may be uninformative.  Skipped when the seed step is already
+        # within an appropriate band around alpha (see _maybe_noise_reseed).
+        self._maybe_noise_reseed(x)
 
         # Probe-then-batch: if multiple axes are unbounded after the
         # initial recompute (and possible noise reseed), quickly cover
@@ -962,12 +1050,10 @@ class SAGE(BaseGradientEstimator):
         while True:
             if self._should_stop_refinement():
                 if self._diag_enabled:
-                    pending_axis = bool(self._axis_probe_queue)
-                    stagnated = self._stable_count >= 3 and not pending_axis
                     print(
                         f"[REFINE-STOP] call#{self._diag_call_count}  "
                         f"reason: diam_ok={self.gd_vm < self.gdtset_diath}  "
-                        f"stagnated={stagnated}(stable={self._stable_count})  "
+                        f"stable={self._stable_count}(diagnostic-only)  "
                         f"max_aux={self.aux_samples_count >= 5.0*self.dim}  "
                         f"forced={self.gdt_est_frc}  "
                         f"axis_q={len(self._axis_probe_queue)}  "
@@ -1035,7 +1121,6 @@ class SAGE(BaseGradientEstimator):
         # history_changed and do a full recompute automatically.
         if not lightweight and self.x_current is not None:
             self._recompute_at(self.x_current)
-            self._consume_aux_feedback()
         self._diag_update_time += time.perf_counter() - _upd_t0
 
     def _sync_history(self):

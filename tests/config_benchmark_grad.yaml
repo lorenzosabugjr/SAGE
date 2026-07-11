@@ -8,27 +8,36 @@ list_condnum: [1.0e8]
 
 # Noise parameters (Unified: serves as bound for Uniform or sigma for Gaussian)
 # Original: [1.0, 1.0e-3, 0.0]
-list_noise_param: [1.0, 1.0e-3]
+list_noise_param: [1.0]
 
 # Noise types to sweep (options: "uniform", "gaussian")
 list_noise_type: ["uniform"]
 
 # Problems (options: "least-squares", "lasso", "l1-log-reg", "l2-log-reg", "log-sum-exp")
 list_problem:
-  - "least-squares"
-  - "lasso"
-  - "l1-log-reg"
+  # - "least-squares"
+  # - "lasso"
+  # - "l1-log-reg"
   - "l2-log-reg"
   - "log-sum-exp"
 
 # Gradient Accuracy Benchmark Settings
 grad_bmk_dtype: "float128"     # dtype used for FFD/CFD benchmark points and stencil arithmetic
-gdtcalcstep: "1.0e-6"    # FFD/CFD step, GSG/CGSG radius, NMXFD sigma, SAGE initial step; string lets np.float128 parse it directly
+gdtcalcstep: "1.0"    # FFD/CFD step, GSG/CGSG radius, NMXFD sigma, SAGE initial step; string lets np.float128 parse it directly
 grad_bmk_npoints: 250         # Number of random test points per problem instance
 grad_bmk_nproblems: 100       # Number of random problem instances (randseeds 1..100)
 grad_bmk_estimators:           # Estimators to benchmark ("truth" is the reference, not listed here)
-  - "ffd"
-  - "cfd"
-  - "gsg"
-  - "cgsg"
-  - "nmxfd"
+  - "sage"
+
+# SAGE noise-bound mode (options: "estimate", "known"). Default: "estimate".
+# "estimate": SAGE estimates the noise bound eps from data via the LP (default).
+# "known": pass a calibrated noise_bound into SAGE, removing eps from the
+#          LP's decision variables. For uniform noise, the true bound (max
+#          |noise|) is bmk_noise / 2.0, since utils/noise.py draws uniform
+#          noise from [-bmk_noise/2, bmk_noise/2] -- bmk_noise itself is the
+#          full interval width, not the bound. For Gaussian noise, bmk_noise
+#          is a standard deviation and has no hard bound, so "known" mode is
+#          not well-defined: the benchmark harness emits a warning and
+#          falls back to estimate-mode behavior (no noise_bound passed) for
+#          that run.
+sage_noise_bound_mode: "known"

@@ -19,6 +19,7 @@ class SAGE(BaseGradientEstimator):
         diam_mode: Optional[str] = None,
         callback: Optional[Callable[[], None]] = None,
         init_step: float = 1e-6,
+        noise_bound: Optional[float] = None,
     )
 ```
 
@@ -31,8 +32,16 @@ class SAGE(BaseGradientEstimator):
 *   `diam_mode`: `"exact"` or `"approx"`. Defaults to `"approx"` when `quickmode=True`.
 *   `callback`: Optional callback invoked after each auxiliary evaluation.
 *   `init_step`: Step size for the initial simplex when history has 0 or 1 samples.
+*   `noise_bound`: Optional a priori bound on the noise magnitude. Defaults to `None`, in
+    which case SAGE estimates the noise bound `eps` from data as part of the LP, exactly
+    as before. If given a finite value `>= 0`, SAGE fixes `ns_est` to that value, drops the
+    `eps` decision variable from the LP, and never overwrites `ns_est` with an LP result.
+    `noise_bound` is an absolute bounded-noise assumption: `|f(x) - f_true(x)| <=
+    noise_bound` must hold for every evaluation. For stochastic noise models without a
+    deterministic bound, choose a conservative effective bound yourself.
 
-SAGE estimates the noise bound internally.
+SAGE estimates the noise bound internally unless `noise_bound` is supplied, in which case it
+uses that fixed value instead (see `noise_bound` above).
 If history has 0 or 1 samples on the first call, SAGE evaluates `x0` and `x0 + init_step * e_i` to seed the history.
 
 ---

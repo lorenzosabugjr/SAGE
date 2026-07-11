@@ -79,6 +79,19 @@ class CreateEstimatorTests(unittest.TestCase):
 
         self.assertEqual(estimator.init_step, 1.5e-3)
 
+    def test_sage_forwards_noise_bound(self):
+        estimator = create_estimator(
+            "sage",
+            constant_objective,
+            dims=2,
+            history=HistoryBuffer(),
+            noise_bound=0.42,
+        )
+
+        self.assertEqual(estimator.noise_bound, 0.42)
+        self.assertTrue(estimator.noise_bound_is_fixed)
+        self.assertEqual(estimator.ns_est, 0.42)
+
     def test_fixed_parameter_aliases_are_unsupported(self):
         removed_names = ("ffd1.0", "cfd1.0", "gsg1.0", "cgsg1.0", "nmxfd1.0")
         for name in removed_names:

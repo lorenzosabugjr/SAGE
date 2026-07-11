@@ -6,7 +6,7 @@ This guide demonstrates how to integrate SAGE into your optimization pipelines. 
 
 If you have a noisy black-box function `my_noisy_func(x)`, you can replace your gradient estimator with SAGE directly.
 Keep in mind that SAGE may call `fun` multiple times per gradient estimate.
-SAGE estimates the noise bound internally. If the history has 0 or 1 samples on the first call, SAGE seeds forward-coordinate points around the first query using `init_step` (default `1e-6`).
+By default, SAGE estimates the noise bound internally as part of its LP (`noise_bound=None`). If the history has 0 or 1 samples on the first call, SAGE seeds forward-coordinate points around the first query using `init_step` (default `1e-6`).
 
 ```python
 import numpy as np
@@ -53,6 +53,25 @@ grad_estimator = SAGE(
     initial_history=(X_init, Z_init),
 )
 ```
+
+## Known Noise Bound
+
+If you know an a priori bound on the noise magnitude (e.g. `|f(x) - f_true(x)| <= 0.01` for
+every evaluation), pass it as `noise_bound`. SAGE then fixes its internal `ns_est` to that
+value and drops the noise-bound decision variable from the LP, which reduces LP dimension
+and keeps the assumed noise level from drifting away from your experimental setup.
+
+```python
+grad_estimator = SAGE(
+    fun=my_noisy_func,
+    dim=5,
+    noise_bound=0.01,  # known bound; use 0.0 for a noiseless function
+)
+```
+
+`noise_bound` is an absolute bound, not a distributional parameter. If your noise is
+stochastic without a hard bound (e.g. Gaussian), you are responsible for choosing a
+conservative effective bound for SAGE to use.
 
 ## Integration with Scipy
 

@@ -37,6 +37,32 @@ The benchmark supports the following gradient estimators (set `grad_bmk_estimato
 
 Factory functions in `tests/factories.py` instantiate problems and estimators by name.
 
+### SAGE noise-bound mode
+
+The YAML config's top-level `sage_noise_bound_mode` key controls whether SAGE estimates
+the noise bound or is given the benchmark's own noise parameter as a fixed bound:
+
+```yaml
+sage_noise_bound_mode: "estimate"  # or "known"
+```
+
+- `"estimate"` (default): SAGE estimates `eps` from data via the LP, as it always has.
+- `"known"`: for each benchmark noise setting, the runner passes a calibrated
+  `noise_bound` into `create_estimator("sage", ...)`, so SAGE uses the benchmark noise
+  level as a fixed bound and drops `eps` from the LP. The calibration depends on the
+  noise type:
+  - Uniform: `noise_bound = bmk_noise / 2.0`. `utils/noise.py` draws uniform noise from
+    `[-bmk_noise/2, bmk_noise/2]`, so `bmk_noise` itself is the full interval width, not
+    the true bound (max `|noise|`) that SAGE expects.
+  - Gaussian: `bmk_noise` is a standard deviation, not a hard bound, so `"known"` mode
+    is not well-defined. The runner emits a warning and does not pass `noise_bound` for
+    that run (equivalent to falling back to `"estimate"` mode).
+
+This only changes what is passed into the `sage` estimator; it does not affect other
+estimators, the noise generator, or how `noise_param` is interpreted. Result filenames and
+the saved `.mat` schema are unchanged between modes — the copied config snapshot in each
+run's results folder is what distinguishes an `"estimate"` run from a `"known"` run.
+
 ## 4. Running benchmarks
 
 From the repo root:
