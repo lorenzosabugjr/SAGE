@@ -28,6 +28,7 @@ import yaml
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from utils.benchmark_artifacts import copy_config, create_run_dir, get_git_commit, tee_stdout
+from utils.config_coercion import coerce_float, coerce_int, coerce_numeric_list, coerce_optional_scalar
 from utils.noise import NoiseType
 from utils.history import HistoryBuffer
 
@@ -56,42 +57,6 @@ def load_config(path: str) -> dict:
             f"got {cfg['sage_noise_bound_mode']!r}"
         )
     return cfg
-
-
-def _coerce_float(value, key: str) -> float:
-    if isinstance(value, bool):
-        raise ValueError(f"{key} must be numeric, got {value!r}")
-    try:
-        return float(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"{key} must be numeric, got {value!r}") from exc
-
-
-def _coerce_int(value, key: str) -> int:
-    if isinstance(value, bool):
-        raise ValueError(f"{key} must be an integer, got {value!r}")
-    try:
-        number = float(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"{key} must be an integer, got {value!r}") from exc
-
-    if not number.is_integer():
-        raise ValueError(f"{key} must be an integer, got {value!r}")
-    return int(number)
-
-
-def _coerce_numeric_list(cfg: dict, key: str, coerce):
-    if key not in cfg:
-        return
-    values = cfg[key]
-    if not isinstance(values, list):
-        raise ValueError(f"{key} must be a list")
-    cfg[key] = [coerce(value, f"{key}[{idx}]") for idx, value in enumerate(values)]
-
-
-def _coerce_optional_scalar(cfg: dict, key: str, coerce):
-    if key in cfg:
-        cfg[key] = coerce(cfg[key], key)
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,54 @@
+# Configuration for Optimization Benchmark
+
+# Dimensions to test
+list_dims: [20]
+
+# Condition numbers
+list_condnum: [1.0, 1.0e4, 1.0e8]
+
+# Noise parameters (Unified: serves as bound for Uniform or sigma for Gaussian)
+list_noise_param: [0.0, 1.0e-3, 1.0]
+
+# Noise types to sweep (options: "uniform", "gaussian")
+list_noise_type: ["uniform"]
+
+# Problems (options: "least-squares", "lasso", "l1-log-reg", "l2-log-reg", "log-sum-exp")
+list_problem:
+  - "least-squares"
+  - "lasso"
+  - "l1-log-reg"
+  - "l2-log-reg"
+  - "log-sum-exp"
+
+
+# Gradient estimators (options: "ffd", "cfd", "gsg", "cgsg", "nmxfd", "sage", "truth")
+list_grad_est:
+  - "ffd"
+  - "cfd"
+  - "gsg"
+  - "cgsg"
+  - "nmxfd"
+
+# Trial Benchmark Settings
+bmk_maxtrials: 100
+max_evals_mult: 50    # Multiplied by D to get the per-trial evaluation budget
+
+# Optimizer Settings
+opt_bmk_dtype: "float128"    # dtype used for optimizer arithmetic
+gdtcalcstep: "1.0e-6"    # gradient-estimator step/radius/sigma; string lets np.float128 parse it directly
+stepsize_mode: "adaptive"    # "adaptive" (Armijo line search) or "fixed"
+stepsize: "1.0"
+armijo_beta: "0.5"
+armijo_c: "1.0e-6"
+min_stepsize: "1.0e-6"
+max_line_search_iters: 100
+recompute_grad_every_ls_failures: 5
+reset_stepsize_at_floor: true
+sage_reset_on_step: false
+
+# Data-Profile Settings
+target_ratios: [0.1, 0.01, 0.001]
+
+# Diagnostics / Artifacts
+verbose: false
+save_eval_history: false

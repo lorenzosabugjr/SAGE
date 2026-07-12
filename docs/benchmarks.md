@@ -2,6 +2,15 @@
 
 This document summarizes the benchmark setup used in the paper (https://arxiv.org/abs/2508.19400) and implemented in `tests/`.
 
+There are two independent benchmark families:
+
+- **Gradient accuracy benchmarks** (`tests/benchmark_grad.py`): compare
+  estimated gradients against the true gradient at fixed test points, with
+  no optimization involved. See sections 1-6 below.
+- **Optimization benchmarks** (`tests/benchmark_opt.py`): run
+  `optimizers.GradientDescent` end-to-end with each gradient estimator and
+  record data-profile-style success statistics. See sections 7-9.
+
 ## 1. Problems (P1-P5)
 
 The benchmark problems map to the `problems/` modules:
@@ -132,3 +141,111 @@ warn_skip` produces partial plots instead).
 
 `results_plot_grad.m` is an equivalent MATLAB script for interactive use
 (user-editable settings at the top, no YAML parsing needed).
+
+## 7. Optimization benchmark
+
+`tests/benchmark_opt.py` runs `optimizers.GradientDescent` (plain gradient
+descent with an adaptive Armijo line search) on each configured
+`(dim, problem, condnum, estimator, noise_type, noise_param)` combo for
+`bmk_maxtrials` independent trials (trial seed == trial index), and
+aggregates the per-evaluation accepted-iterate history plus success/
+eval-to-target statistics into one `.mat` file per combo.
+
+```bash
+python -m tests.benchmark_opt --config tests/config_benchmark_opt.yaml
+```
+
+Run artifacts follow the same convention as the gradient benchmark:
+a timestamped folder under `results/` containing a byte-preserving config
+copy, `log.txt`, and the `.mat` result files, named:
+
+```text
+opt-bmk-{D}D-{problem}-{condnum}-{estimator}-{noise_type}-{noise_param:.6f}.mat
+```
+
+Two small diagnostic configs are also provided for quick manual runs:
+`tests/config_benchmark_opt_diag.yaml` and
+`tests/config_benchmark_opt_diag_ls.yaml`.
+
+### SAGE-mother compatibility behavior
+
+This port intentionally preserves the following SAGE-mother computational
+behaviors, since the goal of the port is to reproduce mother's optimization
+results rather than redesign them:
+
+- **Evaluation budget** (`max_evals = max_evals_mult * D`) counts *every*
+  objective evaluation against the same budget: the initial evaluation,
+  SAGE's own initialization samples, rejected line-search trial points, and
+  accepted line-search trial points. Budget exhaustion (`StopIteration`) is
+  normal termination, not a failed trial.
+- **Rejected line-search points** are still passed to the estimator's
+  history via a lightweight update, so SAGE (and other stateful estimators)
+  benefit from every function call, not just accepted steps.
+- **SAGE optimizer start**: when the estimator is `sage`, optimization
+  starts from the *best point already present in SAGE's initialized
+  history* (from its auto-seeded simplex), not necessarily the original
+  sampled initial point.
+- **Two initial objective values are recorded per trial**:
+  `Z_initial_*` (the original sampled initial point, before SAGE
+  initialization) and `Z_start_*` (the actual point optimization starts
+  from, after SAGE initialization). Success ratios and `evals_to_target`
+  use the deterministic **true** objective at `Z_start` as the
+  denominator, never `Z_initial`.
+- **Accepted-iterate history** (`res_hist_true` / `res_hist_eval` /
+  `time_hist`) is recorded once per objective evaluation (not once per
+  accepted step), and is padded to exactly `max_evals` rows with `NaN`.
+- Failed trials (e.g. an unknown problem name) remain represented in the
+  output with `trial_status="error"` and a `trial_error` message; their
+  history stays fully `NaN` and they count as unsolved for every target
+  ratio.
+
+## 8. Optimization benchmark artifact fields
+
+Each `opt-bmk-*.mat` file contains:
+
+- `res_hist_true`, `res_hist_eval`, `time_hist`: `(max_evals, n_trials)`,
+  `NaN`-padded per-evaluation accepted-iterate history (true objective,
+  evaluated/noisy objective, and elapsed `time.perf_counter()` seconds).
+- `Z_initial_true_vec` / `Z_initial_eval_vec`: original sampled initial
+  objective values, per trial.
+- `Z_start_true_vec` / `Z_start_eval_vec` (aliased as `Z0_true_vec` /
+  `Z0_eval_vec`): actual optimizer-start objective values, per trial.
+- `final_true` / `final_eval`, `last_hist_true` / `last_hist_eval`: final
+  recorded objective values per trial (the `last_hist_*` fields are
+  extracted from the padded history as a cross-check against `final_*`).
+- `n_evals`: number of objective evaluations consumed by each trial.
+- `target_ratios`: the configured target success ratios.
+- `evals_to_target`, `success_by_target`: `(n_targets, n_trials)`, the
+  number of evaluations to first reach `true_objective / Z_start_true <=
+  target_ratio`, and whether that target was reached at all.
+- `trial_status`, `trial_error`: per-trial `"ok"` / `"error"` status and
+  any error message.
+- `auxs_hist`: SAGE-only, mean auxiliary-sample count per trial.
+- Metadata: `config_path`, `output_dir`, `run_timestamp`, `git_commit`,
+  `max_evals`, `problem`, `dim`, `condnum`, `estimator`, `noise_type`,
+  `noise_param`, `stepsize_mode`, `stepsize`, line-search parameters,
+  `opt_bmk_dtype`, `gdtcalcstep`.
+
+## 9. Plotting optimization data profiles
+
+`utils/plot_opt_profiles.py` reads a YAML settings file and, for each
+requested `(dim, problem, condnum, noise_type, noise_param)` combination
+and each configured target ratio, generates one PDF data profile: the
+fraction of trials solved (y-axis) as a function of function evaluations
+divided by dimension (x-axis, default) or raw evaluations
+(`x_axis: raw_evals`), with one line per configured estimator. It also
+writes an `opt_profile_summary.csv` with per-`(combo, target_ratio,
+estimator)` trial counts, success rate, and solved-trial median/mean
+evaluations to target.
+
+```bash
+python -m utils.plot_opt_profiles --options docs/config_plot_opt.yaml --dry-run
+python -m utils.plot_opt_profiles --options docs/config_plot_opt.yaml
+```
+
+See `docs/config_plot_opt.yaml` for a documented example (required fields:
+`source_dirs`, `dims`, `problems`, `condnums`, `noise_types`,
+`noise_params`, `estimators`). Matching is filename-based; duplicate
+matches raise an error listing all duplicate paths, and missing matches
+raise by default (`missing_policy: warn_skip` produces partial plots
+instead).

@@ -1,0 +1,57 @@
+# Example configuration for utils/plot_opt_profiles.py
+#
+# Run with:
+#   python -m utils.plot_opt_profiles --options docs/config_plot_opt.yaml --dry-run
+#   python -m utils.plot_opt_profiles --options docs/config_plot_opt.yaml
+#
+# Adjust source_dirs below to point at your own benchmark run folder(s)
+# under results/ before generating real plots.
+
+# Required: directories to search for opt-bmk-*.mat files.
+source_dirs:
+  - "results/2026-07-09 23-01-36/"
+
+# Required: which (dim, problem, condnum, noise_type, noise_param)
+# combinations to plot. One figure is generated per combination per
+# target ratio.
+dims: [20]
+problems: ["least-squares", "lasso", "l1-log-reg", "l2-log-reg", "log-sum-exp"]
+condnums: [1.0, 1.0e4, 1.0e8]
+noise_types: ["uniform"]
+noise_params: [0.0, 1.0e-3, 1.0]
+
+# Required: estimators to compare, plotted as one line per estimator.
+estimators: ["ffd", "cfd", "gsg", "cgsg", "nmxfd"]
+
+# Optional settings (defaults shown):
+
+# Search source_dirs recursively instead of only their top level.
+recursive: true
+
+# Where PDFs (and the summary CSV) are written.
+output_dir: plots
+
+# "error" (default): raise if any configured estimator has no matching
+# file for a combination. "warn_skip": warn and plot with whatever
+# estimators are available.
+missing_policy: error
+
+# Only "error" is supported: raise if more than one file matches the
+# same (dim, problem, condnum, noise_type, noise_param, estimator).
+duplicate_policy: error
+
+# "evals_per_dim" (default): x-axis is function evaluations / D.
+# "raw_evals": x-axis is raw function evaluation counts.
+x_axis: evals_per_dim
+
+# Which target ratios to plot, one figure each. Omit (or leave null) to
+# use every target ratio recorded in the matched .mat files.
+target_ratios: [0.1, 0.01, 0.001]
+
+# Write plots/opt_profile_summary.csv with one row per
+# (combination, target_ratio, estimator).
+write_summary_csv: true
+summary_csv: plots/opt_profile_summary.csv
+
+# Overwrite existing PDFs in output_dir.
+overwrite: true

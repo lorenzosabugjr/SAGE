@@ -110,3 +110,32 @@ res = minimize(
 print("Optimized Result:", res.x)
 ```
 
+## Plain Gradient Descent with `optimizers.GradientDescent`
+
+If you don't need `scipy.optimize`'s full machinery, `optimizers.GradientDescent`
+provides a minimal, dependency-free alternative with the same adaptive Armijo
+line search used in the optimization benchmark. Its search direction is
+always `p = -g` (no BFGS/quasi-Newton support).
+
+```python
+import numpy as np
+from estimators import SAGE
+from optimizers import GradientDescent, StepSizeMode
+
+def my_noisy_func(x):
+    return np.sum(x**2) + np.random.normal(0, 0.01)
+
+x0 = np.random.rand(5)
+grad_estimator = SAGE(fun=my_noisy_func, dim=5, quickmode=True, init_step=1e-6)
+
+opt = GradientDescent(
+    fun=my_noisy_func,
+    x0=x0,
+    grad_estimator=grad_estimator,
+    stepsizemode=StepSizeMode.ADAPTIVE,
+)
+opt.run(max_evals=200)  # runs until the estimator's history hits 200 evaluations
+
+print("Optimized point:", opt.x_k, "objective:", opt.z_k)
+```
+
