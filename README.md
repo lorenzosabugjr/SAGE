@@ -47,8 +47,8 @@ Each pair `(xi, xj)` yields a **slab** of admissible gradients. The intersection
 ## Practical Notes
 
 - **Stateful:** SAGE aggregates the full history of evaluations `(x_k, f(x_k))`. You can pass `initial_history` to seed it, or let SAGE auto-seed forward-coordinate points around the first query when history has 0 or 1 samples with `init_step` (default `1e-6`).
-- **Extra evaluations:** SAGE may call `fun` multiple times per gradient estimate to refine the set, so track evaluation budgets accordingly.
-- **Noise handling:** SAGE estimates the noise bound internally; you only need to define the noisy objective.
+- **Extra evaluations:** SAGE may call `fun` multiple times per gradient estimate to refine the set (up to `2*D` auxiliary samples per query on top of the `2*D + 1` seed stencil), so track evaluation budgets accordingly. Refinement stops early once the gradient set certifies `rel_tol` relative accuracy (constructor kwarg, default `0.5`) — points with strong gradients typically stop at the seed stencil itself.
+- **Noise handling:** By default (`noise_bound=None`), SAGE self-calibrates the noise bound from the seed stencil's second differences and then treats it as fixed; you only need to define the noisy objective. If you know an a priori bound on the noise magnitude, pass it via `noise_bound` (e.g. `noise_bound=0.0` for a noiseless function) to fix the bound up front and drop it from the LP's decision variables. `noise_bound` is an absolute bound on `|f(x) - f_true(x)|`; for stochastic noise without a deterministic bound, choose a conservative effective value yourself.
 
 ## Installation
 

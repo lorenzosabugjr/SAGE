@@ -23,14 +23,16 @@ list_problem:
 
 # Gradient Accuracy Benchmark Settings
 grad_bmk_dtype: "float128"     # dtype used for FFD/CFD benchmark points and stencil arithmetic
-gdtcalcstep: "1.0"    # FFD/CFD step, GSG/CGSG radius, NMXFD sigma, SAGE initial step; string lets np.float128 parse it directly
+gdtcalcstep: "1.0e-6"    # FFD/CFD step, GSG/CGSG radius, NMXFD sigma, SAGE initial step; string lets np.float128 parse it directly
 grad_bmk_npoints: 250         # Number of random test points per problem instance
 grad_bmk_nproblems: 100       # Number of random problem instances (randseeds 1..100)
 grad_bmk_estimators:           # Estimators to benchmark ("truth" is the reference, not listed here)
   - "sage"
 
 # SAGE noise-bound mode (options: "estimate", "known"). Default: "estimate".
-# "estimate": SAGE estimates the noise bound eps from data via the LP (default).
+# "estimate": SAGE self-calibrates the noise bound from the seed stencil's
+#             second differences and then fixes it (default; see
+#             docs/implementation.md Sec. 5).
 # "known": pass a calibrated noise_bound into SAGE, removing eps from the
 #          LP's decision variables. For uniform noise, the true bound (max
 #          |noise|) is bmk_noise / 2.0, since utils/noise.py draws uniform
@@ -40,4 +42,4 @@ grad_bmk_estimators:           # Estimators to benchmark ("truth" is the referen
 #          not well-defined: the benchmark harness emits a warning and
 #          falls back to estimate-mode behavior (no noise_bound passed) for
 #          that run.
-sage_noise_bound_mode: "known"
+sage_noise_bound_mode: "estimate"

@@ -38,6 +38,7 @@ class SAGE(BaseGradientEstimator):
         init_step: float = 1e-6,
         reset_on_step: bool = False,
         noise_bound: Optional[float] = None,
+        rel_tol: float = 0.5,
     ):
         """
         Initialize the SAGE estimator.
@@ -52,9 +53,14 @@ class SAGE(BaseGradientEstimator):
             callback: Optional callback invoked after each auxiliary evaluation.
             init_step: Step size used to seed a CFD-like stencil when history has 0 or 1 samples.
             noise_bound: Optional a priori bound on the noise magnitude. If None
-                (default), SAGE estimates the noise bound from data as before. If a
-                finite value >= 0 is given, SAGE fixes the noise bound and removes
-                the noise-bound decision variable from the LP.
+                (default), SAGE self-calibrates the bound at the seed stencil
+                (see _maybe_calibrate_noise) and then treats it as fixed. If a
+                finite value >= 0 is given, SAGE fixes the noise bound up front
+                and removes the noise-bound decision variable from the LP.
+            rel_tol: Relative-accuracy certificate target: refinement stops once
+                the gradient-set diameter falls below rel_tol * ||gdt_est||
+                (see _should_stop_refinement). This is the main cost/accuracy
+                knob: smaller values buy accuracy with more evaluations.
         """
         if noise_bound is not None:
             if not np.isfinite(noise_bound) or noise_bound < 0.0:
@@ -68,12 +74,13 @@ class SAGE(BaseGradientEstimator):
         self.callback = callback
         self.init_step = init_step
         # Step size actually used by the last singleton CFD seed stencil;
-        # compared against alpha to decide whether a noise re-stencil is
-        # redundant (see _maybe_noise_reseed).
+        # the noise self-calibration (_maybe_calibrate_noise) reconstructs
+        # the stencil's sample locations from it.
         self._seed_step = init_step
         self.reset_on_step = reset_on_step
         self.noise_bound = noise_bound
         self.noise_bound_is_fixed = noise_bound is not None
+        self.rel_tol = float(rel_tol)
         if diam_mode is None:
             self.diam_mode = "approx" if quickmode else "exact"
         else:
@@ -124,16 +131,8 @@ class SAGE(BaseGradientEstimator):
         self.aux_samples_count = 0
         self._used_probe_axes = set()
 
-        self._did_noise_reseed = False
         self._prev_gdt_est = None
         self._stable_count = 0
-        # Stability of the *final* (box-centered/projected) point estimate,
-        # as opposed to _stable_count above which tracks the raw LP vertex.
-        # Used as an early-stop signal (see _should_stop_refinement) since
-        # the box-centered estimate is far less solver-path-dependent than
-        # the raw vertex the old (removed) stagnation branch tracked.
-        self._prev_gdt_est_final = None
-        self._stable_count_final = 0
 
         # Adaptive auxiliary sampling radius: geometric growth factor applied
         # on top of the modeled alpha once every axis has been probed at the
@@ -141,6 +140,36 @@ class SAGE(BaseGradientEstimator):
         # query in _reset_query_state so it never leaks across calls.
         self._aux_radius_growth = 1.0
         self._aux_radius_growth_factor = 2.0
+
+        # ── Informed auxiliary radius + pilot curvature guard ──
+        # _r_target: per-query one-shot sampling radius, sized so that a
+        # single full axis sweep's information floor (4*eps/r per axis,
+        # aggregated over dim axes) would just meet the rel_tol certificate
+        # (see _compute_informed_radius). None until the seed LP has run.
+        self._r_target = None
+        # Auxiliary radius never drops below this multiple of the
+        # informative scale (_radius_scale): sampling inside the radius the
+        # seed stencil already covered adds strictly noisier constraints
+        # (verified empirically: reseeding at alpha < init_step degraded
+        # least-squares accuracy ~11x).
+        self._alpha_floor_mult = 1.5
+        # Cap on the informed radius, as a multiple of the informative scale.
+        self._informed_r_cap_mult = 16.0
+        # Pilot second-difference guard: for a completed symmetric axis pair
+        # at radius r, D2 = |z(x+r e) + z(x-r e) - 2 z(x)|/2 can reach at
+        # most 2*eps from noise alone, so D2 > _pilot_guard_mult * eps
+        # proves real curvature at scale r and triggers a global shrink of
+        # _r_target to r*sqrt(2*eps/D2) (the radius where the quadratic
+        # residual ~ the noise slab), restarting the sweep. At most
+        # _pilot_max_shrinks shrinks per query.
+        self._pilot_guard_mult = 3.0
+        self._pilot_max_shrinks = 3
+        self._pilot_shrinks = 0
+        self._pending_pair = []
+        # Auxiliary sample cap per query, as a multiple of dim. With the
+        # 2*dim+1 seed stencil this bounds a query's total evaluations by
+        # (2 + _aux_cap_mult)*dim + 1.
+        self._aux_cap_mult = 2.0
 
         # ── Diagnostic counters ──
         self._diag_lp_count = 0          # total LP solves
@@ -195,10 +224,10 @@ class SAGE(BaseGradientEstimator):
         self.aux_samples_count = 0
         self._prev_gdt_est = None
         self._stable_count = 0
-        self._prev_gdt_est_final = None
-        self._stable_count_final = 0
-        self._did_noise_reseed = False
         self._aux_radius_growth = 1.0
+        self._r_target = None
+        self._pending_pair = []
+        self._pilot_shrinks = 0
         # Reset per-iterate Hessian norm: H is local to each iterate, so it
         # should not carry over when jumping to a new query point.
         # In contrast, hess_lipsc (γ) is a global Lipschitz constant and
@@ -232,19 +261,6 @@ class SAGE(BaseGradientEstimator):
         self._calc_diam()
         _diam_dt = time.perf_counter() - _diam_t0
         self._update_point_estimate()
-
-        # Track stability of the *final* point estimate (box-centered/
-        # projected), separately from the raw-vertex _stable_count tracked
-        # inside _grad_est_lp. This is what _should_stop_refinement's
-        # stagnation branch uses.
-        if self._prev_gdt_est_final is not None:
-            g_norm = max(norm(self.gdt_est), 1e-30)
-            change = norm(self.gdt_est - self._prev_gdt_est_final) / g_norm
-            if change < 0.02:
-                self._stable_count_final += 1
-            else:
-                self._stable_count_final = 0
-        self._prev_gdt_est_final = np.array(self.gdt_est, copy=True)
 
         if self._diag_enabled and (_lp_dt > 1.0 or _diam_dt > 1.0):
             print(
@@ -492,28 +508,58 @@ class SAGE(BaseGradientEstimator):
         return float(-res.fun if maximize else res.fun)
 
     def _model_alpha(self) -> tuple[float, bool]:
-        """Un-grown optimal-radius estimate alpha* (theory.md Sec. 5) and
-        whether it was resolved from a real positive root of the cubic
-        (True) or is the unit-Hessian-norm bootstrap fallback (False).
+        """Auxiliary sampling radius and whether it is "resolved" (should
+        NOT be multiplied by the axis-exhaustion growth factor again).
 
-        Radius growth (see _next_aux_direction) must apply only in the
-        unresolved case. Once the cubic resolves a real root, alpha* is
-        already the correct bias/variance-optimal radius for the
-        currently-estimated H_i/gamma_H; multiplying it by a growth factor
-        accumulated during an earlier unresolved period can produce a
-        wildly oversized radius, since the cube root is highly sensitive
-        near H_i = gamma_H = 0 (a barely-resolved, near-noise curvature
-        estimate can imply an alpha* many times larger than the radius that
-        just resolved it).
+        Priority order:
+          1. The per-query informed radius _r_target, when available
+             (see _compute_informed_radius): returned with the growth
+             factor already folded in, flagged resolved so callers use it
+             as-is. Growth still escalates the radius sweep-by-sweep, and
+             the pilot guard (_consume_pilot_feedback) can shrink _r_target
+             globally when it proves curvature at the current scale.
+          2. Otherwise the cubic-root alpha* (theory.md Sec. 5) when the LP
+             has resolved curvature, or the unit-Hessian-norm bootstrap
+             2*sqrt(eps) when it hasn't (unresolved: growth applies).
+
+        Either way the result is floored at _alpha_floor_mult times the
+        informative scale (_radius_scale): the seed stencil already
+        extracted the information available at init_step, so sampling
+        inside that radius only adds constraints with strictly worse
+        noise-to-signal (empirically ~11x accuracy loss on least-squares
+        when the old noise-reseed did exactly that), and under noise no
+        sample inside ~2*sqrt(eps) is informative regardless of init_step.
         """
+        floor = self._alpha_floor_mult * self._radius_scale()
+        if self._r_target is not None:
+            return max(self._r_target, floor) * self._aux_radius_growth, True
+
         aa = 1 / 3 * self.hess_lipsc
         bb = 1 / 2 * self.hess_norm
         dd = -2 * self.ns_est
         rt = np.roots([aa, bb, 0, dd])
         roots = rt[np.isreal(rt) & (rt.real >= 0)]
         if roots.size > 0:
-            return float(roots.real[0]), True
-        return 2.0 * np.sqrt(max(self.ns_est, 1e-30)), False
+            return max(float(roots.real[0]), floor), True
+        return max(2.0 * np.sqrt(max(self.ns_est, 1e-30)), floor), False
+
+    def _radius_scale(self) -> float:
+        """Informative sampling scale: max(init_step, 2*sqrt(eps)).
+
+        The radius floor and the informed-radius clip band are anchored on
+        this rather than on init_step alone. Under noise, a sample at
+        distance d contributes a slab of width ~4*eps/d in gradient units,
+        so nothing inside ~2*sqrt(eps) (the unit-Hessian bootstrap radius)
+        is informative no matter how init_step was chosen -- anchoring on
+        init_step alone pinned every auxiliary sample to ~1.5e-6 when a
+        production run was launched with the default init_step=1e-6 under
+        noise 1.0, producing rel errors of ~1e5 (the old noise-reseed's
+        absolute jump to 2*sqrt(eps) was what used to absorb this mistake).
+        When init_step is already noise-appropriate, init_step dominates
+        and behavior is unchanged.
+        """
+        return max(float(self.init_step),
+                   2.0 * float(np.sqrt(max(self.ns_est, 0.0))))
 
     def _compute_aux_step(self) -> tuple[float, float]:
         if self.ns_est <= 1e-9:
@@ -593,28 +639,46 @@ class SAGE(BaseGradientEstimator):
         return None
 
     def _should_stop_refinement(self) -> bool:
+        """Relative-accuracy-certificate stopping.
+
+        Stop when the gradient-set diameter is certifiably small RELATIVE
+        to the estimated gradient itself (gd_vm < rel_tol * ||gdt_est||):
+        the box then brackets the gradient to ~rel_tol/2 relative accuracy,
+        which is the quantity the benchmark (and any consumer of the
+        estimate) actually cares about. Points with strong gradients
+        certify at the seed stencil (0 auxiliary samples, CFD-cost);
+        weak-gradient points refine until certified or capped.
+
+        The absolute gdtset_diaid floor applies ONLY in the noiseless
+        regime (ns_est ~ 0), where ||gdt_est|| -> 0 near an optimum makes
+        the relative target degenerate and the seed stencil is already
+        near-machine-precision. Under noise it must NOT apply: near-zero-
+        gradient points are exactly where refinement pays most, and an
+        absolute floor was measured to cut them off 10x short
+        (l1-log-reg at noise 1e-3: median rel err 1.33 with the floor vs
+        0.131 without, at 47 vs 64 evaluations).
+
+        The old absolute target (gd_vm < gdtset_diath = 1.01*alpha*) and
+        the box-centered stagnation stop were both removed: the former is
+        derived from H_i/gamma_H estimates that are usually stuck at a
+        degenerate fallback (unreachable moving target), and the latter was
+        measured to trigger mid-improvement on exactly the points where
+        refinement pays (cutting achievable accuracy ~3x) while wasting
+        ~40 evaluations on points that should stop at the seed.
+
+        _stable_count (raw LP-vertex stability) remains diagnostic-only.
+        """
         pending_axis_pair = bool(self._axis_probe_queue)
-        # _stable_count (LP-vertex stability across consecutive solves) is
-        # still tracked in _grad_est_lp as a diagnostic signal but does not
-        # gate stopping: an unmoving raw LP vertex does not imply the
-        # actual gradient-set diameter has shrunk, only that the
-        # (possibly-arbitrary) vertex the solver picked stopped moving.
-        #
-        # _stable_count_final tracks the *box-centered/projected* estimate
-        # instead (see _recompute_at) -- a far less solver-path-dependent
-        # quantity now that the Milestone-3 point-estimate fix is in place.
-        # Reinstated as a stopping condition: gdtset_diath is derived from
-        # H_i/gamma_H estimates that are themselves often stuck at a
-        # degenerate fallback, or that jump discontinuously the moment
-        # curvature resolves -- making "diameter below threshold" an
-        # unreliable, moving target to chase all the way to the aux
-        # sample cap. Stopping once the reported estimate has genuinely
-        # settled avoids spending the full budget chasing that target.
+        g_norm = max(float(norm(np.asarray(self.gdt_est, dtype=float))), 1e-30)
+        certified = np.isfinite(self.gd_vm) and (
+            self.gd_vm < self.rel_tol * g_norm
+            or (self.ns_est <= 1e-9 and self.gd_vm < self.gdtset_diaid)
+        )
         return (
-            (self.gd_vm < self.gdtset_diath and not pending_axis_pair)
+            (certified and not pending_axis_pair)
             or self.gdt_est_frc
-            or (self.aux_samples_count >= 5.0 * self.dim and not pending_axis_pair)
-            or (self._stable_count_final >= 3 and not pending_axis_pair)
+            or (self.aux_samples_count >= self._aux_cap_mult * self.dim
+                and not pending_axis_pair)
         )
 
     def _finish_refinement(self) -> None:
@@ -631,6 +695,10 @@ class SAGE(BaseGradientEstimator):
         x_new = x + alpha * direction
         self.aux_step_sizes_current = np.hstack((self.aux_step_sizes_current, float(alpha)))
         self.aux_samples_count += 1
+        # Track (axis, radius, location) so _consume_pilot_feedback can
+        # compute the pair's second difference once both members land.
+        axis = int(np.argmax(np.abs(direction)))
+        self._pending_pair.append((axis, float(alpha), np.asarray(x_new)))
         return x_new
 
 
@@ -796,76 +864,173 @@ class SAGE(BaseGradientEstimator):
         t_star = max(0.0, t_star)
         self.gdt_est = g_v + t_star * delta
 
-    def _reseed_at_alpha(self, x: np.ndarray, alpha: float) -> None:
-        """Add a symmetric coordinate stencil at distance *alpha* from *x*.
+    def _seed_second_differences(self, x: np.ndarray) -> Optional[np.ndarray]:
+        """Per-axis second differences of the seed stencil around *x*:
+        D2_i = |z(x + h e_i) + z(x - h e_i) - 2 z(x)| / 2 with h = _seed_step.
 
-        Called when the first LP detects noise, making the initial tiny-step
-        seed uninformative.  This gives the LP a full set of coordinate-aligned
-        constraints at a noise-appropriate distance so that every gradient
-        component is well-constrained immediately.
+        Returns None when the stencil samples cannot all be found in the
+        history (e.g. the history was pre-seeded without a stencil).
         """
+        h = self._seed_step
+        i0 = self.history.find_indices(np.asarray(x))
+        if i0.size == 0:
+            return None
+        z0 = float(self.Zn[i0[0]])
+        d2s = np.empty(self.dim)
         for i in range(self.dim):
             e_i = np.zeros(self.dim)
             e_i[i] = 1.0
-            self._eval_and_record(x + alpha * e_i)
-            self._eval_and_record(x - alpha * e_i)
+            ip = self.history.find_indices(x + h * e_i)
+            im = self.history.find_indices(x - h * e_i)
+            if ip.size == 0 or im.size == 0:
+                return None
+            d2s[i] = abs(float(self.Zn[ip[0]]) + float(self.Zn[im[0]]) - 2.0 * z0) / 2.0
+        return d2s
+
+    def _maybe_calibrate_noise(self, x: np.ndarray) -> None:
+        """Estimate-mode noise self-calibration at the seed stencil.
+
+        The LP's estimated ns_est MINIMIZES eps subject to feasibility, so
+        it is a lower bound on the noise, not an estimator (measured at
+        0.3-0.7x the true bound). Everything derived from it (informed
+        radius, pilot guard threshold, certificate tightness) inherits the
+        bias. Instead, estimate eps from the seed stencil's own second
+        differences: for noise-only D2 (uniform noise, locally-linear f at
+        scale h), sd(D2) ~ 0.7*eps and max(D2) <= 2*eps, so
+            eps_cal = max( sqrt(2*mean(D2^2)),  max(D2)/1.5,  ns_est )
+        is nearly unbiased (measured 0.45-0.50 vs true 0.5 on the log-type
+        benchmark problems). Then switch to fixed-bound mode with eps_cal so
+        the LP, the informed radius, the pilot guard and the stopping
+        certificate all use it consistently, and re-solve once (no new
+        evaluations).
+
+        On functions with real curvature or kinks at scale h the D2s also
+        contain curvature signal, inflating eps_cal (least-squares/lasso:
+        ~20x). This errs conservative -- a larger eps loosens the certificate
+        and enlarges the informed radius, and the pilot guard walks the
+        radius back if the far samples then prove curvature -- and those
+        problem types certify at the seed anyway. Calibration runs once per
+        estimator lifetime (noise is a property of the oracle, not of the
+        query point) and is skipped entirely when a noise_bound was supplied
+        or the seed LP found the data consistent with zero noise.
+        """
+        if self.noise_bound_is_fixed or self.ns_est <= 1e-9:
+            return
+        d2s = self._seed_second_differences(np.asarray(x))
+        if d2s is None:
+            return
+        eps_cal = max(
+            float(np.sqrt(2.0 * np.mean(d2s ** 2))),
+            float(np.max(d2s)) / 1.5,
+            float(self.ns_est),
+        )
+        self.noise_bound = eps_cal
+        self.noise_bound_is_fixed = True
+        self.ns_est = eps_cal
+        if self._diag_enabled:
+            print(
+                f"[SAGE-PHASE] call#{self._diag_call_count} "
+                f"noise calibrated  eps_cal={eps_cal:.4e}  "
+                f"d2_max={np.max(d2s):.4e}",
+                flush=True,
+            )
+        self._recompute_at(np.asarray(x))
+
+    def _compute_informed_radius(self) -> None:
+        """Size the auxiliary sampling radius to the stopping certificate.
+
+        A full axis sweep at radius r can tighten each axis width to the
+        information floor ~4*eps/r, giving a box diameter ~sqrt(dim)*4*eps/r.
+        Setting that equal to the certificate target rel_tol*||g|| yields
+            r* = 4 * eps * sqrt(dim) / (rel_tol * ||g_seed||),
+        the radius whose single sweep would just certify -- instead of
+        crawling toward it via 2x growth per exhausted sweep. Clipped to
+        [_alpha_floor_mult, _informed_r_cap_mult] * _radius_scale(). Computed once
+        per query from the post-seed LP estimate; the pilot guard may shrink
+        it afterwards if the first pair proves curvature at that scale.
+
+        Points with strong gradients get a small r* (safe: their certificate
+        is nearly met already), weak-gradient points get a large r* -- and
+        their curvature bias tolerance also scales with rel_tol*||g||, which
+        is what the pilot guard checks against.
+        """
+        if self._r_target is not None or self.ns_est <= 1e-9:
+            return
+        g_norm = float(norm(np.asarray(self.gdt_est, dtype=float)))
+        if not np.isfinite(g_norm) or g_norm <= 0.0:
+            return
+        scale = self._radius_scale()
+        r = 4.0 * float(self.ns_est) * np.sqrt(self.dim) / (self.rel_tol * g_norm)
+        self._r_target = float(np.clip(
+            r, self._alpha_floor_mult * scale, self._informed_r_cap_mult * scale))
+        if self._diag_enabled:
+            print(
+                f"[SAGE-PHASE] call#{self._diag_call_count} "
+                f"informed radius  r*={self._r_target:.4e}  "
+                f"(raw={r:.4e}  |g|={g_norm:.4e}  eps={self.ns_est:.4e})",
+                flush=True,
+            )
+
+    def _consume_pilot_feedback(self, x: np.ndarray) -> None:
+        """Second-difference curvature guard over completed axis pairs.
+
+        For a completed symmetric pair (+r e_i, -r e_i), noise alone (|n| <=
+        eps) can push D2 = |z+ + z- - 2 z0|/2 to at most 2*eps, so
+        D2 > _pilot_guard_mult*eps proves real curvature at scale r on that
+        axis -- the regime where the LP (which structurally prefers
+        H = gamma = 0 whenever feasible) folds the residual into a biased
+        gradient instead. Response: shrink _r_target globally to
+        r*sqrt(2*eps/D2) (where the quadratic residual ~ the noise slab) and
+        restart the sweep, so the first pair of each sweep acts as a pilot
+        and at most one pair is committed at a too-large radius.
+
+        A per-axis backoff (resampling only the violating axis at the small
+        radius) was tried and REJECTED: the replacement samples fall below
+        the LP band filter (search_alpha/10) and never reach the LP, while
+        the poisoned far samples remain -- measured strictly worse than no
+        guard at all.
+        """
+        if len(self._pending_pair) < 2:
+            return
+        (ax1, a1, xp), (ax2, a2, xm) = self._pending_pair[-2:]
+        if ax1 != ax2 or abs(a1 - a2) > 1e-12 * max(a1, a2):
+            return  # not a matched pair; keep sliding
+        self._pending_pair = []
+        i_p = self.history.find_indices(xp)
+        i_m = self.history.find_indices(xm)
+        i_0 = self.history.find_indices(np.asarray(x))
+        if i_p.size == 0 or i_m.size == 0 or i_0.size == 0:
+            return
+        d2 = abs(float(self.Zn[i_p[0]]) + float(self.Zn[i_m[0]])
+                 - 2.0 * float(self.Zn[i_0[0]])) / 2.0
+        eps = max(float(self.ns_est), 1e-30)
+        if d2 <= self._pilot_guard_mult * eps:
+            return
+        if self._pilot_shrinks >= self._pilot_max_shrinks:
+            return
+        a_new = max(a1 * float(np.sqrt(2.0 * eps / d2)),
+                    self._alpha_floor_mult * self._radius_scale())
+        if a_new >= 0.9 * a1:
+            return  # already at/near the floor; nothing to shrink
+        self._pilot_shrinks += 1
+        self._r_target = a_new
+        self._aux_radius_growth = 1.0
+        self._axis_probe_queue = []
+        self._used_probe_axes.clear()
+        if self._diag_enabled:
+            print(
+                f"[SAGE-PHASE] call#{self._diag_call_count} "
+                f"pilot shrink #{self._pilot_shrinks}  axis={ax1}  "
+                f"D2={d2:.4e}  r {a1:.4e} -> {a_new:.4e}",
+                flush=True,
+            )
 
     def _get_aux_alpha(self) -> float:
         """Return the current auxiliary step size based on noise / curvature."""
         if self.ns_est <= 1e-9:
             return self.init_step
-        aa = 1 / 3 * self.hess_lipsc
-        bb = 1 / 2 * self.hess_norm
-        dd = -2 * self.ns_est
-        rt = np.roots([aa, bb, 0, dd])
-        roots = rt[np.isreal(rt) & (rt.real >= 0)]
-        if len(roots) > 0:
-            return float(roots.real[0])
-        return 2.0 * np.sqrt(max(self.ns_est, 1e-30))
-
-    def _maybe_noise_reseed(self, x: np.ndarray) -> None:
-        """Noise-aware re-stencil, skipped when the existing seed is already
-        well-placed.
-
-        If the first LP detected noise, the tiny-step seed stencil is
-        normally uninformative, so a full coordinate stencil is placed at
-        the noise-appropriate distance (alpha) so the band filter can
-        exclude the seed and the LP gets well-conditioned constraints from
-        the start. But if the seed stencil (placed at self._seed_step) is
-        already within a band around alpha, it is already appropriately
-        placed and re-stenciling would just double the evaluation floor for
-        no benefit.
-        """
-        if not (self.ns_est > 1e-9 and not self._did_noise_reseed):
-            return
-
-        self._did_noise_reseed = True
-        alpha = self._get_aux_alpha()
-
-        band_lo = alpha / 2.0
-        band_hi = alpha * 2.0
-        in_band = self._seed_step is not None and band_lo <= self._seed_step <= band_hi
-
-        if self._diag_enabled:
-            print(
-                f"[SAGE-PHASE] call#{self._diag_call_count} "
-                f"noise reseed check  ns={self.ns_est:.4e}  alpha={alpha:.4e}  "
-                f"seed_step={self._seed_step}  in_band={in_band}",
-                flush=True,
-            )
-
-        if in_band:
-            return
-
-        self._reseed_at_alpha(x, alpha)
-        self._recompute_at(x)
-        if self._diag_enabled:
-            print(
-                f"[SAGE-PHASE] call#{self._diag_call_count} "
-                f"noise reseed done  hist={self.history.Zn.size}  "
-                f"diam={self.gd_vm:.4e}",
-                flush=True,
-            )
+        alpha, _ = self._model_alpha()
+        return alpha
 
     def _probe_then_batch_inf_axes(self, x: np.ndarray) -> bool:
         """Probe-then-batch: quickly cover all unbounded gradient axes.
@@ -1017,10 +1182,10 @@ class SAGE(BaseGradientEstimator):
         else:
             self.x_current = x
 
-        # Noise-aware re-stencil: if the first LP detected noise, the tiny-step
-        # seed may be uninformative.  Skipped when the seed step is already
-        # within an appropriate band around alpha (see _maybe_noise_reseed).
-        self._maybe_noise_reseed(x)
+        # Estimate-mode noise self-calibration from the seed stencil's own
+        # second differences (see _maybe_calibrate_noise). No new
+        # evaluations; switches to fixed-bound mode on first success.
+        self._maybe_calibrate_noise(x)
 
         # Probe-then-batch: if multiple axes are unbounded after the
         # initial recompute (and possible noise reseed), quickly cover
@@ -1038,11 +1203,16 @@ class SAGE(BaseGradientEstimator):
                 )
             return self.gdt_est
 
+        # Size the auxiliary radius to the certificate target, now that the
+        # (possibly recalibrated) seed LP has produced gdt_est and ns_est.
+        self._compute_informed_radius()
+
         if self._diag_enabled:
             print(
                 f"[SAGE-PHASE] call#{self._diag_call_count} "
                 f"entering refinement loop  diam={self.gd_vm:.4e}  "
-                f"th={self.gdtset_diath:.4e}",
+                f"|g|={norm(np.asarray(self.gdt_est, dtype=float)):.4e}  "
+                f"r*={self._r_target}",
                 flush=True,
             )
 
@@ -1050,14 +1220,14 @@ class SAGE(BaseGradientEstimator):
         while True:
             if self._should_stop_refinement():
                 if self._diag_enabled:
+                    g_norm = max(float(norm(np.asarray(self.gdt_est, dtype=float))), 1e-30)
                     print(
                         f"[REFINE-STOP] call#{self._diag_call_count}  "
-                        f"reason: diam_ok={self.gd_vm < self.gdtset_diath}  "
-                        f"stable={self._stable_count}(diagnostic-only)  "
-                        f"max_aux={self.aux_samples_count >= 5.0*self.dim}  "
+                        f"reason: certified={self.gd_vm < self.rel_tol * g_norm or self.gd_vm < self.gdtset_diaid}  "
+                        f"max_aux={self.aux_samples_count >= self._aux_cap_mult*self.dim}  "
                         f"forced={self.gdt_est_frc}  "
                         f"axis_q={len(self._axis_probe_queue)}  "
-                        f"diam={self.gd_vm:.4e}  th={self.gdtset_diath:.4e}",
+                        f"diam={self.gd_vm:.4e}  rel_target={self.rel_tol * g_norm:.4e}",
                         flush=True,
                     )
                 self._finish_refinement()
@@ -1072,6 +1242,7 @@ class SAGE(BaseGradientEstimator):
             _fun_dt = time.perf_counter() - _aux_t0
             _upd_t0 = time.perf_counter()
             self.update(x_new, z_new)
+            self._consume_pilot_feedback(x)
             _upd_dt = time.perf_counter() - _upd_t0
             _refine_aux += 1
 

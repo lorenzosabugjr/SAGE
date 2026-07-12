@@ -7,13 +7,19 @@ Covers Milestones 1-2 of plans/plan_20260709_202428.md:
 
 Covers Milestones 1-4 of plans/plan_20260710_132820.md (see
 plans/prd_20260710_132820.md for background):
-  - Milestone 1: skip redundant noise-reseed when the seed step is already
-    in-band around alpha.
-  - Milestone 2: feedback-driven auxiliary sampling radius growth.
+  - Milestone 2: axis-cycling auxiliary sampling radius growth.
   - Milestone 3: bounding-box center point estimate with segment-clip
     projection.
-  - Milestone 4: diameter-gated stopping criterion (stagnation branch no
-    longer independently terminates refinement).
+
+Covers the certificate-driven refinement redesign (2026-07-12):
+  - estimate-mode noise self-calibration from seed second differences
+    (_maybe_calibrate_noise), replacing the removed noise-reseed;
+  - informed auxiliary radius sized to the stopping certificate
+    (_compute_informed_radius) with the 1.5*init_step alpha floor;
+  - second-difference pilot curvature guard (_consume_pilot_feedback);
+  - relative-accuracy-certificate stopping with the 2*dim auxiliary cap
+    (_should_stop_refinement), replacing the absolute diameter target and
+    the stagnation stop.
 
 Run with: python -m unittest tests.test_sage
 """
@@ -224,55 +230,262 @@ class SageLpFailureHandlingTests(unittest.TestCase):
             est._grad_est_lp(np.zeros(dim))
 
 
-class SageNoiseReseedBandSkipTests(unittest.TestCase):
-    """Milestone 1 (plan_20260710_132820): skip redundant noise-reseed when
-    the seed stencil is already in-band around the current alpha."""
+class SageNoiseCalibrationTests(unittest.TestCase):
+    """Estimate-mode noise self-calibration from the seed stencil's second
+    differences (_maybe_calibrate_noise): the LP's estimated ns_est is a
+    lower bound (it minimizes eps subject to feasibility), so SAGE
+    recalibrates from D2 statistics and switches to fixed-bound mode."""
 
-    def _seeded(self, dim: int, noise_bound: float, init_step: float) -> tuple[SAGE, np.ndarray]:
-        est = SAGE(constant_objective, dim=dim, noise_bound=noise_bound, init_step=init_step)
+    def _stenciled(self, dim: int, values: dict, init_step: float = 1.0,
+                   **kwargs) -> tuple[SAGE, np.ndarray]:
+        """SAGE with a seed stencil whose z-values come from a lookup table
+        keyed by the sampled point (rounded tuple)."""
+        def fun(x):
+            return values[tuple(np.round(np.asarray(x, dtype=float), 9))]
+        est = SAGE(fun, dim=dim, init_step=init_step, **kwargs)
         x0 = np.zeros(dim)
         est._eval_and_record(x0)
         est._seed_cfd_stencil_if_singleton(x0)
         return est, x0
 
-    def test_seed_step_in_band_skips_reseed(self):
+    def _values_for_d2(self, dim: int, d2: np.ndarray, h: float = 1.0) -> dict:
+        """z-values giving exactly D2_i = d2[i]: z0 = 0, z(+h e_i) = 2*d2_i,
+        z(-h e_i) = 0 (so |z+ + z- - 2 z0|/2 = d2_i)."""
+        values = {tuple(np.zeros(dim)): 0.0}
+        for i in range(dim):
+            e = np.zeros(dim)
+            e[i] = h
+            values[tuple(np.round(e, 9))] = 2.0 * d2[i]
+            values[tuple(np.round(-e, 9))] = 0.0
+        return values
+
+    def test_calibration_sets_conservative_fixed_bound(self):
+        dim = 3
+        d2 = np.array([0.3, 0.9, 0.6])
+        est, x0 = self._stenciled(dim, self._values_for_d2(dim, d2))
+        est.ns_est = 0.05  # simulate the LP's (lower-bound) estimate
+
+        est._maybe_calibrate_noise(x0)
+
+        expected = max(float(np.sqrt(2.0 * np.mean(d2 ** 2))),
+                       float(np.max(d2)) / 1.5, 0.05)
+        self.assertTrue(est.noise_bound_is_fixed)
+        self.assertAlmostEqual(est.noise_bound, expected)
+        self.assertAlmostEqual(est.ns_est, expected)
+
+    def test_calibration_never_below_lp_estimate(self):
         dim = 2
-        noise_bound = 0.25
-        # alpha = 2*sqrt(noise_bound) = 1.0 when H = gamma = 0; init_step is
-        # chosen to land exactly on it, well inside [alpha/2, alpha*2].
-        est, x0 = self._seeded(dim, noise_bound, init_step=1.0)
-        hist_before = est.history.Zn.size
-        self.assertEqual(hist_before, 1 + 2 * dim)
+        d2 = np.array([1e-6, 2e-6])  # tame draws
+        est, x0 = self._stenciled(dim, self._values_for_d2(dim, d2))
+        est.ns_est = 0.4  # LP already proves at least this much noise
 
-        est._maybe_noise_reseed(x0)
+        est._maybe_calibrate_noise(x0)
 
-        self.assertEqual(est.history.Zn.size, hist_before)
-        self.assertTrue(est._did_noise_reseed)
+        self.assertAlmostEqual(est.noise_bound, 0.4)
 
-    def test_seed_step_out_of_band_triggers_reseed(self):
+    def test_calibration_skipped_when_bound_already_fixed(self):
         dim = 2
-        noise_bound = 0.25
-        # init_step far below the [0.5, 2.0] band implied by alpha = 1.0.
-        est, x0 = self._seeded(dim, noise_bound, init_step=1e-6)
-        hist_before = est.history.Zn.size
-        self.assertEqual(hist_before, 1 + 2 * dim)
+        d2 = np.array([0.3, 0.9])
+        est, x0 = self._stenciled(dim, self._values_for_d2(dim, d2),
+                                  noise_bound=0.25)
 
-        est._maybe_noise_reseed(x0)
+        est._maybe_calibrate_noise(x0)
 
-        self.assertEqual(est.history.Zn.size, hist_before + 2 * dim)
-        self.assertTrue(est._did_noise_reseed)
+        self.assertEqual(est.noise_bound, 0.25)
 
-    def test_full_call_skips_reseed_when_in_band(self):
-        est = SAGE(constant_objective, dim=2, noise_bound=0.25, init_step=1.0)
-        with patch.object(SAGE, "_reseed_at_alpha") as mock_reseed:
-            est(np.zeros(2))
-        mock_reseed.assert_not_called()
+    def test_calibration_skipped_when_lp_found_no_noise(self):
+        dim = 2
+        d2 = np.array([0.3, 0.9])
+        est, x0 = self._stenciled(dim, self._values_for_d2(dim, d2))
+        est.ns_est = 0.0
 
-    def test_full_call_reseeds_when_out_of_band(self):
-        est = SAGE(constant_objective, dim=2, noise_bound=0.25, init_step=1e-6)
-        with patch.object(SAGE, "_reseed_at_alpha", wraps=est._reseed_at_alpha) as mock_reseed:
-            est(np.zeros(2))
-        mock_reseed.assert_called_once()
+        est._maybe_calibrate_noise(x0)
+
+        self.assertFalse(est.noise_bound_is_fixed)
+
+    def test_calibration_skipped_when_stencil_not_in_history(self):
+        est = SAGE(constant_objective, dim=2, init_step=1.0)
+        _seed_history(est, 2, 5)  # pre-seeded history, no stencil around x0
+        est.ns_est = 0.1
+
+        est._maybe_calibrate_noise(np.zeros(2))
+
+        self.assertFalse(est.noise_bound_is_fixed)
+
+    def test_full_call_calibrates_in_estimate_mode(self):
+        rng = np.random.RandomState(3)
+
+        def noisy(x):
+            return rng.uniform(-0.5, 0.5)
+
+        est = SAGE(noisy, dim=3, init_step=1.0)
+        est(np.zeros(3))
+
+        self.assertTrue(est.noise_bound_is_fixed)
+        self.assertGreater(est.noise_bound, 0.0)
+
+
+class SageInformedRadiusTests(unittest.TestCase):
+    """Per-query informed auxiliary radius (_compute_informed_radius):
+    r* = 4*eps*sqrt(dim)/(rel_tol*||g_seed||), clipped to [1.5, 16] times
+    the informative scale max(init_step, 2*sqrt(eps)), consumed by
+    _model_alpha with growth folded in."""
+
+    def _est(self, dim=4, init_step=1.0, rel_tol=0.5):
+        return SAGE(constant_objective, dim=dim, init_step=init_step,
+                    rel_tol=rel_tol)
+
+    def test_formula_and_clip_midrange(self):
+        est = self._est()
+        est.ns_est = 0.5
+        est.gdt_est = np.array([1.0, 0.0, 0.0, 0.0])
+        est._compute_informed_radius()
+        # r = 4*0.5*sqrt(4)/(0.5*1) = 8, inside the clip band
+        self.assertAlmostEqual(est._r_target, 8.0)
+
+    def test_weak_gradient_clips_to_cap(self):
+        est = self._est()
+        est.ns_est = 0.5
+        est.gdt_est = np.array([1e-4, 0.0, 0.0, 0.0])
+        est._compute_informed_radius()
+        # scale = max(1.0, 2*sqrt(0.5)); cap = 16*scale
+        self.assertAlmostEqual(est._r_target, 16.0 * 2.0 * np.sqrt(0.5))
+
+    def test_strong_gradient_clips_to_floor(self):
+        est = self._est()
+        est.ns_est = 0.5
+        est.gdt_est = np.array([100.0, 0.0, 0.0, 0.0])
+        est._compute_informed_radius()
+        self.assertAlmostEqual(est._r_target, 1.5 * 2.0 * np.sqrt(0.5))
+
+    def test_radius_scale_rescues_tiny_init_step(self):
+        # A production run launched with the default init_step=1e-6 under
+        # noise 1.0 must not pin the radius to ~1.5e-6: the informative
+        # scale falls back to 2*sqrt(eps) (the old noise-reseed's absolute
+        # jump target), keeping auxiliary samples at a noise-informative
+        # distance.
+        est = self._est(init_step=1e-6)
+        est.ns_est = 0.5
+        self.assertAlmostEqual(est._radius_scale(), 2.0 * np.sqrt(0.5))
+        est.gdt_est = np.array([1e6, 0.0, 0.0, 0.0])  # noise-inflated seed g
+        est._compute_informed_radius()
+        self.assertAlmostEqual(est._r_target, 1.5 * 2.0 * np.sqrt(0.5))
+
+    def test_radius_scale_is_init_step_when_noise_small(self):
+        est = self._est(init_step=1.0)
+        est.ns_est = 0.01  # 2*sqrt(eps) = 0.2 < init_step
+        self.assertAlmostEqual(est._radius_scale(), 1.0)
+
+    def test_not_computed_without_noise_or_gradient(self):
+        est = self._est()
+        est.ns_est = 0.0
+        est.gdt_est = np.ones(4)
+        est._compute_informed_radius()
+        self.assertIsNone(est._r_target)
+
+        est.ns_est = 0.5
+        est.gdt_est = np.zeros(4)
+        est._compute_informed_radius()
+        self.assertIsNone(est._r_target)
+
+    def test_model_alpha_uses_informed_radius_with_growth(self):
+        est = self._est()
+        est._r_target = 8.0
+        est._aux_radius_growth = 2.0
+        alpha, resolved = est._model_alpha()
+        self.assertAlmostEqual(alpha, 16.0)
+        self.assertTrue(resolved)
+
+    def test_model_alpha_floored_without_informed_radius(self):
+        est = self._est(init_step=1.0)
+        est.ns_est = 1e-6  # bootstrap 2*sqrt(1e-6) = 2e-3 << floor of 1.5
+        alpha, resolved = est._model_alpha()
+        self.assertAlmostEqual(alpha, 1.5)
+        self.assertFalse(resolved)
+
+    def test_reset_per_query(self):
+        est = self._est()
+        est._r_target = 8.0
+        est._pilot_shrinks = 2
+        est._pending_pair = [(0, 1.0, np.zeros(4))]
+        est._reset_query_state()
+        self.assertIsNone(est._r_target)
+        self.assertEqual(est._pilot_shrinks, 0)
+        self.assertEqual(est._pending_pair, [])
+
+
+class SagePilotGuardTests(unittest.TestCase):
+    """Second-difference pilot guard (_consume_pilot_feedback): a completed
+    axis pair whose D2 exceeds what noise alone can produce shrinks the
+    informed radius globally and restarts the sweep."""
+
+    def _est_with_pair(self, d2: float, r: float = 8.0, eps: float = 0.5):
+        dim = 2
+        est = SAGE(constant_objective, dim=dim, noise_bound=eps, init_step=1.0)
+        x0 = np.zeros(dim)
+        xp = np.array([r, 0.0])
+        xm = np.array([-r, 0.0])
+        # z-values giving exactly |z+ + z- - 2 z0|/2 = d2
+        est.history.add(x0, 0.0)
+        est.history.add(xp, 2.0 * d2)
+        est.history.add(xm, 0.0)
+        est._sync_history()
+        est._r_target = r
+        est._aux_radius_growth = 2.0
+        est._used_probe_axes = {0}
+        est._axis_probe_queue = [np.array([0.0, 1.0])]
+        est._pending_pair = [(0, r, xp), (0, r, xm)]
+        return est, x0
+
+    def test_violating_pair_shrinks_radius_and_restarts_sweep(self):
+        eps, r, d2 = 0.5, 8.0, 8.0  # threshold = 3*eps = 1.5 < d2
+        est, x0 = self._est_with_pair(d2, r=r, eps=eps)
+
+        est._consume_pilot_feedback(x0)
+
+        self.assertAlmostEqual(est._r_target, r * np.sqrt(2.0 * eps / d2))
+        self.assertEqual(est._aux_radius_growth, 1.0)
+        self.assertEqual(est._axis_probe_queue, [])
+        self.assertEqual(est._used_probe_axes, set())
+        self.assertEqual(est._pilot_shrinks, 1)
+
+    def test_noise_level_d2_does_not_trigger(self):
+        eps = 0.5
+        est, x0 = self._est_with_pair(d2=1.0, r=8.0, eps=eps)  # 1.0 <= 3*eps
+
+        est._consume_pilot_feedback(x0)
+
+        self.assertEqual(est._r_target, 8.0)
+        self.assertEqual(est._pilot_shrinks, 0)
+
+    def test_shrink_count_capped(self):
+        est, x0 = self._est_with_pair(d2=8.0)
+        est._pilot_shrinks = est._pilot_max_shrinks
+
+        est._consume_pilot_feedback(x0)
+
+        self.assertEqual(est._r_target, 8.0)
+
+    def test_mismatched_pair_slides_without_consuming(self):
+        est, x0 = self._est_with_pair(d2=8.0)
+        # Second pending entry is a different axis: not a completed pair.
+        est._pending_pair = [(0, 8.0, np.array([8.0, 0.0])),
+                             (1, 8.0, np.array([0.0, 8.0]))]
+
+        est._consume_pilot_feedback(x0)
+
+        self.assertEqual(est._r_target, 8.0)
+        self.assertEqual(len(est._pending_pair), 2)
+
+    def test_shrink_never_goes_below_alpha_floor(self):
+        # Enormous D2 would imply a radius below the alpha floor; a shrink
+        # to the floor itself is applied at most once (a_new >= 0.9*a1
+        # no-ops). Floor = 1.5 * max(init_step, 2*sqrt(eps)).
+        est, x0 = self._est_with_pair(d2=1e6, r=8.0, eps=0.5)
+
+        est._consume_pilot_feedback(x0)
+
+        self.assertAlmostEqual(est._r_target, 1.5 * 2.0 * np.sqrt(0.5))
 
 
 class SageAuxRadiusGrowthTests(unittest.TestCase):
@@ -303,18 +516,21 @@ class SageAuxRadiusGrowthTests(unittest.TestCase):
         est = SAGE(constant_objective, dim=2, init_step=1e-3)
         est.hess_norm = 0.0
         est.hess_lipsc = 0.0
-        est.ns_est = 0.25  # forces the 2*sqrt(ns_est) fallback: alpha = 1.0
+        # Forces the 2*sqrt(ns_est) fallback (= 1.0), which the alpha floor
+        # then lifts to 1.5 * max(init_step, 2*sqrt(ns_est)) = 1.5.
+        est.ns_est = 0.25
+        expected = 1.5 * 1.0
 
         est._aux_radius_growth = 1.0
         alpha, model_alpha = est._compute_aux_step()
-        self.assertAlmostEqual(alpha, 1.0)
-        self.assertAlmostEqual(model_alpha, 1.0)
+        self.assertAlmostEqual(alpha, expected)
+        self.assertAlmostEqual(model_alpha, expected)
         diath_ungrown = est.gdtset_diath
 
         est._aux_radius_growth = 3.0
         alpha, model_alpha = est._compute_aux_step()
-        self.assertAlmostEqual(alpha, 3.0)
-        self.assertAlmostEqual(model_alpha, 1.0)
+        self.assertAlmostEqual(alpha, 3.0 * expected)
+        self.assertAlmostEqual(model_alpha, expected)
         # gdtset_diath must stay tied to the unscaled model alpha (non-goal:
         # do not change the gdtset_diath = 1.01*alpha formula).
         self.assertAlmostEqual(est.gdtset_diath, diath_ungrown)
@@ -441,80 +657,85 @@ class SagePointEstimateBoxCenterTests(unittest.TestCase):
             self.assertTrue(np.all(est.bl - est.Al @ est.gdt_est >= -1e-6))
 
 
-class SageDiameterGatedStoppingTests(unittest.TestCase):
-    """Milestone 4 (plan_20260710_132820) originally removed stagnation as a
-    stopping signal entirely; it was later reinstated (see docs/theory.md
-    Sec. 7 and docs/implementation.md Sec. 5) as a deliberate eval-cost
-    control, tracking the *box-centered* estimate's stability
-    (`_stable_count_final`) rather than the raw LP vertex's
-    (`_stable_count`, still diagnostic-only, does not gate stopping). So
-    stopping is gated by diameter-met, forced-stop, the 5*dim auxiliary cap,
-    OR box-centered-estimate stagnation -- four independent triggers, not
-    three."""
+class SageCertificateStoppingTests(unittest.TestCase):
+    """Relative-accuracy-certificate stopping (_should_stop_refinement):
+    stop when gd_vm < rel_tol * ||gdt_est|| (or below the absolute
+    gdtset_diaid floor for the noiseless/near-optimum regime), on the
+    forced flag, or at the 2*dim auxiliary cap. The old absolute
+    1.01*alpha* diameter target and the box-centered stagnation stop are
+    both gone; raw LP-vertex stability (_stable_count) stays
+    diagnostic-only."""
 
-    def test_raw_vertex_stability_alone_does_not_stop_refinement(self):
-        # _stable_count (the raw, solver-path-dependent LP vertex) is
-        # diagnostic-only and must never gate stopping on its own --
-        # distinct from _stable_count_final below, which does.
-        est = SAGE(constant_objective, dim=2, init_step=1e-3)
-        est._stable_count = 3
-        est.gd_vm = 100.0
-        est.gdtset_diath = 1.0
+    def _est(self, dim=2):
+        est = SAGE(constant_objective, dim=dim, init_step=1e-3)
         est.gdt_est_frc = False
         est.aux_samples_count = 0
+        return est
+
+    def test_certified_relative_diameter_stops(self):
+        est = self._est()
+        est.gdt_est = np.array([1.0, 0.0])
+        est.gd_vm = 0.4  # < rel_tol (0.5) * ||g|| (1.0)
+        self.assertTrue(est._should_stop_refinement())
+
+    def test_uncertified_relative_diameter_does_not_stop(self):
+        est = self._est()
+        est.gdt_est = np.array([1.0, 0.0])
+        est.gd_vm = 0.6  # > rel_tol * ||g||, > gdtset_diaid
         self.assertFalse(est._should_stop_refinement())
 
-    def test_stable_count_final_alone_stops_refinement(self):
-        # _stable_count_final (the box-centered estimate) DOES independently
-        # gate stopping -- this is the deliberate eval-cost-control
-        # mechanism described in docs/theory.md Sec. 7.
-        est = SAGE(constant_objective, dim=2, init_step=1e-3)
-        est._stable_count_final = 3
-        est.gd_vm = 100.0
-        est.gdtset_diath = 1.0
-        est.gdt_est_frc = False
-        est.aux_samples_count = 0
+    def test_absolute_floor_stops_when_noiseless_and_gradient_tiny(self):
+        est = self._est()
+        est.ns_est = 0.0
+        est.gdt_est = np.zeros(2)  # relative target degenerate
+        est.gd_vm = 0.01  # < gdtset_diaid = 0.05
         self.assertTrue(est._should_stop_refinement())
 
-    def test_stops_once_diameter_meets_threshold_regardless_of_stability(self):
-        est = SAGE(constant_objective, dim=2, init_step=1e-3)
-        est._stable_count = 0
-        est.gd_vm = 0.5
-        est.gdtset_diath = 1.0
-        est.gdt_est_frc = False
-        est.aux_samples_count = 0
-        self.assertTrue(est._should_stop_refinement())
+    def test_absolute_floor_does_not_apply_under_noise(self):
+        # Near-zero-gradient noisy points are where refinement pays most;
+        # an absolute floor was measured to cut them off 10x short.
+        est = self._est()
+        est.ns_est = 0.5
+        est.gdt_est = np.zeros(2)
+        est.gd_vm = 0.01
+        self.assertFalse(est._should_stop_refinement())
 
-    def test_stops_on_forced_flag_even_if_diameter_is_large(self):
-        est = SAGE(constant_objective, dim=2, init_step=1e-3)
-        est._stable_count = 0
+    def test_raw_vertex_stability_alone_does_not_stop_refinement(self):
+        est = self._est()
+        est._stable_count = 10
+        est.gdt_est = np.array([1.0, 0.0])
         est.gd_vm = 100.0
-        est.gdtset_diath = 1.0
+        self.assertFalse(est._should_stop_refinement())
+
+    def test_stops_on_forced_flag_even_if_uncertified(self):
+        est = self._est()
+        est.gdt_est = np.array([1.0, 0.0])
+        est.gd_vm = 100.0
         est.gdt_est_frc = True
-        est.aux_samples_count = 0
         self.assertTrue(est._should_stop_refinement())
 
-    def test_stops_at_aux_sample_cap_even_if_diameter_is_large_and_not_stable(self):
+    def test_stops_at_two_dim_aux_cap_even_if_uncertified(self):
         dim = 2
-        est = SAGE(constant_objective, dim=dim, init_step=1e-3)
-        est._stable_count = 0
+        est = self._est(dim)
+        est.gdt_est = np.array([1.0, 0.0])
         est.gd_vm = 100.0
-        est.gdtset_diath = 1.0
-        est.gdt_est_frc = False
-        est.aux_samples_count = 5.0 * dim
+        est.aux_samples_count = 2.0 * dim
         self.assertTrue(est._should_stop_refinement())
+
+    def test_infinite_diameter_never_certifies(self):
+        est = self._est()
+        est.gdt_est = np.array([1e30, 0.0])
+        est.gd_vm = np.inf
+        self.assertFalse(est._should_stop_refinement())
 
     def test_pending_axis_probe_blocks_stop_even_at_cap(self):
-        # A pending axis probe blocks all three of the diameter-met,
-        # cap-reached, and stagnation triggers simultaneously (only the
-        # forced-stop flag is unguarded).
+        # A pending axis probe blocks both the certificate and cap triggers
+        # (only the forced-stop flag is unguarded).
         dim = 2
-        est = SAGE(constant_objective, dim=dim, init_step=1e-3)
-        est._stable_count_final = 3
+        est = self._est(dim)
+        est.gdt_est = np.array([1.0, 0.0])
         est.gd_vm = 0.1
-        est.gdtset_diath = 1.0
-        est.gdt_est_frc = False
-        est.aux_samples_count = 5.0 * dim
+        est.aux_samples_count = 2.0 * dim
         est._axis_probe_queue = [np.array([1.0, 0.0])]
         self.assertFalse(est._should_stop_refinement())
 
