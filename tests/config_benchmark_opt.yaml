@@ -4,10 +4,10 @@
 list_dims: [20]
 
 # Condition numbers
-list_condnum: [1.0e8]
+list_condnum: [1.0, 1.0e4, 1.0e8]
 
 # Noise parameters (Unified: serves as bound for Uniform or sigma for Gaussian)
-list_noise_param: [0.0]
+list_noise_param: [0.0, 1.0e-3, 1.0]
 
 # Noise types to sweep (options: "uniform", "gaussian")
 list_noise_type: ["uniform"]
@@ -15,6 +15,11 @@ list_noise_type: ["uniform"]
 # Problems (options: "least-squares", "lasso", "l1-log-reg", "l2-log-reg", "log-sum-exp")
 list_problem:
   - "least-squares"
+  - "lasso"
+  - "l1-log-reg"
+  - "l2-log-reg"
+  - "log-sum-exp"
+
 
 # Gradient estimators (options: "ffd", "cfd", "gsg", "cgsg", "nmxfd", "sage", "truth")
 list_grad_est:

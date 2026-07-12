@@ -9,16 +9,16 @@
 
 # Required: directories to search for opt-bmk-*.mat files.
 source_dirs:
-  - "results/"
+  - "results/2026-07-09 23-01-36/"
 
 # Required: which (dim, problem, condnum, noise_type, noise_param)
 # combinations to plot. One figure is generated per combination per
 # target ratio.
 dims: [20]
-problems: ["least-squares"]
-condnums: [1.0e8]
+problems: ["least-squares", "lasso", "l1-log-reg", "l2-log-reg", "log-sum-exp"]
+condnums: [1.0, 1.0e4, 1.0e8]
 noise_types: ["uniform"]
-noise_params: [0.0]
+noise_params: [0.0, 1.0e-3, 1.0]
 
 # Required: estimators to compare, plotted as one line per estimator.
 estimators: ["ffd", "cfd", "gsg", "cgsg", "nmxfd"]
