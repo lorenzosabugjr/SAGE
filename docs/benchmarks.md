@@ -167,6 +167,27 @@ Two small diagnostic configs are also provided for quick manual runs:
 `tests/config_benchmark_opt_diag.yaml` and
 `tests/config_benchmark_opt_diag_ls.yaml`.
 
+### SAGE: one estimator, two history regimes
+
+`sage` is included in the production `list_grad_est` alongside `ffd`, `cfd`,
+`gsg`, `cgsg`, and `nmxfd`. It is the *same* `SAGE` class, constructed with
+the *same* defaults, used by the gradient-accuracy benchmark (Section 3):
+`quickmode=True`, `diam_mode="approx"`, `init_step = gdtcalcstep`, default
+`rel_tol`, and estimated noise-bound mode. The two benchmark families are
+not comparing different SAGE variants — they differ only in what history is
+available when SAGE is called:
+
+- the gradient-accuracy benchmark builds a fresh, empty `HistoryBuffer` for
+  every isolated query, so each call's stencil and any auxiliary sampling
+  start from nothing;
+- the optimization benchmark shares one `HistoryBuffer` across the whole
+  trial (`sage_reset_on_step: false`), so a later SAGE call can reuse the
+  initial stencil, prior gradient calls' auxiliary points, and every
+  accepted/rejected line-search evaluation already charged to the budget.
+
+See "SAGE per-call diagnostics" in Section 8 for how to measure the effect
+of that reuse from the saved `.mat` fields.
+
 ### SAGE-mother compatibility behavior
 
 This port intentionally preserves the following SAGE-mother computational
@@ -181,19 +202,41 @@ results rather than redesign them:
 - **Rejected line-search points** are still passed to the estimator's
   history via a lightweight update, so SAGE (and other stateful estimators)
   benefit from every function call, not just accepted steps.
-- **SAGE optimizer start**: when the estimator is `sage`, optimization
-  starts from the *best point already present in SAGE's initialized
-  history* (from its auto-seeded simplex), not necessarily the original
-  sampled initial point.
+- **SAGE optimizer start is centered**: the optimizer always starts at the
+  original sampled point `X_initial`, which is also the center of SAGE's
+  initial stencil and first gradient call. `Z_start_eval`/`Z_start_true`
+  therefore equal `Z_initial_eval`/`Z_initial_true` in every current SAGE
+  trial. (Earlier versions of this harness reassigned the SAGE start to the
+  best point already present in SAGE's initialized history; that
+  reassignment decentered the stencil the estimator had just built and has
+  been removed.)
 - **Two initial objective values are recorded per trial**:
-  `Z_initial_*` (the original sampled initial point, before SAGE
-  initialization) and `Z_start_*` (the actual point optimization starts
-  from, after SAGE initialization). Success ratios and `evals_to_target`
-  use the deterministic **true** objective at `Z_start` as the
-  denominator, never `Z_initial`.
+  `Z_initial_*` (the original sampled initial point) and `Z_start_*` (the
+  actual point optimization starts from — equal to `Z_initial_*` for
+  SAGE trials, kept as a separate field pair for schema compatibility with
+  non-SAGE estimators and older result files). Success ratios and
+  `evals_to_target` use the deterministic **true** objective at `Z_start`
+  as the denominator, never `Z_initial`.
+- **One SAGE estimator, two history regimes**: both benchmark families call
+  the same `SAGE` class with the same LP, sample selector, point estimate,
+  stopping criterion, sampling radius, auxiliary policy, cap, and numerical
+  settings (`quickmode=True`, `diam_mode="approx"`, `init_step =
+  gdtcalcstep`, default `rel_tol`, estimated noise-bound mode). They differ
+  only in what history SAGE sees when called: the gradient-accuracy
+  benchmark gives every query a fresh, empty `HistoryBuffer`, while the
+  optimization benchmark shares one `HistoryBuffer` (`reset_on_step:
+  false`) across the initial stencil, every later gradient call, and every
+  accepted/rejected line-search evaluation for the whole trial — so a later
+  SAGE call can reuse samples an earlier call or line search already paid
+  for.
 - **Accepted-iterate history** (`res_hist_true` / `res_hist_eval` /
   `time_hist`) is recorded once per objective evaluation (not once per
   accepted step), and is padded to exactly `max_evals` rows with `NaN`.
+  Initial-stencil and auxiliary evaluations forward-fill the current
+  accepted iterate (they are observations, not iterates); rejected
+  line-search evaluations likewise forward-fill the old iterate; an
+  accepted line-search (or fixed-step) evaluation records the *newly*
+  accepted iterate on that same evaluation's row, not the following one.
 - Failed trials (e.g. an unknown problem name) remain represented in the
   output with `trial_status="error"` and a `trial_error` message; their
   history stays fully `NaN` and they count as unsolved for every target
@@ -225,6 +268,61 @@ Each `opt-bmk-*.mat` file contains:
   `max_evals`, `problem`, `dim`, `condnum`, `estimator`, `noise_type`,
   `noise_param`, `stepsize_mode`, `stepsize`, line-search parameters,
   `opt_bmk_dtype`, `gdtcalcstep`.
+
+### SAGE per-call diagnostics
+
+`sage`-estimator `.mat` files additionally contain one compact diagnostic
+record per public `SAGE.__call__` invocation for the trial (one call per
+optimizer gradient estimation or forced refresh; *not* one row per line-search
+trial point). These fields let the optimization benchmark show whether
+accumulated history reduces fresh auxiliary sampling, without changing SAGE's
+estimation or stopping mechanism:
+
+- `sage_diag_n_calls`: `(n_trials,)`, the number of SAGE calls made in each
+  trial — how many of the leading rows in the fields below are populated for
+  that trial's column.
+- `sage_diag_eval_index`, `sage_diag_hist_size`, `sage_diag_n_neighbors`,
+  `sage_diag_n_aux`: `(max_evals, n_trials)`, `NaN`-padded beyond
+  `sage_diag_n_calls[trial]` (like `res_hist_true`/`res_hist_eval`). Row `ci`
+  of trial `trial_i` describes that trial's `(ci+1)`-th SAGE call:
+  - `eval_index`: the trial-wide objective-evaluation count *before* this
+    call added any evaluations of its own (unaffected by `reset_on_step`).
+  - `hist_size`: the raw history size actually available to this call's
+    selector at call start (equal to `eval_index` unless `reset_on_step`
+    just wiped it). The gap between `hist_size` and `eval_index` across
+    calls in a trial is the reuse signal the optimization benchmark is
+    meant to surface; both are always equal in the gradient-accuracy
+    benchmark's fresh-history calls.
+  - `n_neighbors`: number of samples selected by SAGE's existing selector
+    for the LP that produced the returned gradient estimate.
+  - `n_aux`: number of auxiliary objective evaluations this call added
+    before returning.
+- `sage_diag_stop_reason`: `(max_evals, n_trials)` array of stopping-reason
+  code strings (`""` beyond `sage_diag_n_calls[trial]`), one of:
+  - `relative_criterion`: the relative-diameter criterion
+    `gd_vm < rel_tol * ||gdt_est||` was met.
+  - `noiseless_floor`: the noiseless absolute floor was met.
+  - `forced_stop`: the call was forced to stop (e.g. `force=True` path).
+  - `auxiliary_cap`: the `2*D` auxiliary-sample cap was reached.
+  - `no_aux_direction`: refinement stopped because no further auxiliary
+    direction was available.
+  - `budget_exhaustion`: the call ended mid-refinement because the shared
+    evaluation budget ran out (`StopIteration`); still produces one
+    diagnostic row.
+  - `stale_estimate`: a rare defensive early-return path where the query
+    point drifted from the LP's `x_current` between recompute and
+    refinement; not one of the `_should_stop_refinement` conditions above.
+- `sage_diag_calibration_attempted`, `sage_diag_calibration_fixed`:
+  `(max_evals, n_trials)`, `1.0`/`0.0` (`NaN`-padded like the fields above).
+  `calibration_attempted` marks that estimate-mode noise self-calibration
+  (`_maybe_calibrate_noise`) was invoked on that call; `calibration_fixed`
+  marks that it switched to a fixed noise bound (it can be attempted and
+  intentionally not fix a bound, e.g. when the seed LP is already
+  consistent with zero noise).
+
+These diagnostics never feed back into estimator decisions, and full raw
+`Xn`/`Zn` histories are not saved by default — only this compact per-call
+summary.
 
 ## 9. Plotting optimization data profiles
 

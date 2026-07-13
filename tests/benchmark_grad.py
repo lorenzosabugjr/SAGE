@@ -45,11 +45,11 @@ def load_config(path: str) -> dict:
     if not isinstance(cfg, dict):
         raise ValueError("Benchmark config must be a mapping")
 
-    _coerce_numeric_list(cfg, "list_dims", _coerce_int)
-    _coerce_numeric_list(cfg, "list_condnum", _coerce_float)
-    _coerce_numeric_list(cfg, "list_noise_param", _coerce_float)
-    _coerce_optional_scalar(cfg, "grad_bmk_npoints", _coerce_int)
-    _coerce_optional_scalar(cfg, "grad_bmk_nproblems", _coerce_int)
+    coerce_numeric_list(cfg, "list_dims", coerce_int)
+    coerce_numeric_list(cfg, "list_condnum", coerce_float)
+    coerce_numeric_list(cfg, "list_noise_param", coerce_float)
+    coerce_optional_scalar(cfg, "grad_bmk_npoints", coerce_int)
+    coerce_optional_scalar(cfg, "grad_bmk_nproblems", coerce_int)
     cfg.setdefault("sage_noise_bound_mode", "estimate")
     if cfg["sage_noise_bound_mode"] not in ("estimate", "known"):
         raise ValueError(

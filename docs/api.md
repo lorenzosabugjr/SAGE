@@ -44,6 +44,25 @@ SAGE estimates the noise bound internally unless `noise_bound` is supplied, in w
 uses that fixed value instead (see `noise_bound` above).
 If history has 0 or 1 samples on the first call, SAGE evaluates `x0` and `x0 + init_step * e_i` to seed the history.
 
+**`call_diagnostics`**: a `list[SageCallDiagnostic]`, one entry appended per public
+`__call__` invocation (including calls that end via budget-exhaustion `StopIteration`).
+Each `SageCallDiagnostic` is a dataclass with:
+*   `eval_index`: shared-history evaluation count at call start.
+*   `hist_size`: this call's own history size at call start (differs from `eval_index`
+    only right after a `reset_on_step` wipe).
+*   `n_neighbors`: neighbor count selected by the existing selector for the LP that
+    produced the returned estimate.
+*   `n_aux`: auxiliary evaluations added during the call.
+*   `stop_reason`: one of the `SageStopReason` codes (`relative_criterion`,
+    `noiseless_floor`, `forced_stop`, `auxiliary_cap`, `no_aux_direction`,
+    `budget_exhaustion`, `stale_estimate`).
+*   `calibration_attempted` / `calibration_fixed`: whether `_maybe_calibrate_noise` was
+    invoked this call, and whether it switched to a fixed noise bound.
+
+Diagnostic collection is purely observational and never changes an estimator decision; see
+`docs/benchmarks.md` ("SAGE per-call diagnostics") for how the optimization benchmark
+serializes this list into `.mat` fields.
+
 ---
 
 ### `FFDEstimator` / `CFDEstimator`
@@ -186,3 +205,19 @@ Enum for defining the noise model.
 ### `HistoryBuffer`
 
 Tracks evaluation history `(x, z)` pairs. You can share the same history between an objective function and a gradient estimator.
+
+`Xn`/`Zn`/`Zn_true` store every raw evaluation in order (including duplicates); estimators
+like SAGE reuse this raw record. `z_k_eval_hist`/`z_k_true_hist` separately track the
+*accepted incumbent* at each evaluation index: every `add()` call forward-fills whatever
+incumbent is currently set (an evaluation is an observation by default — an initial
+stencil sample, an auxiliary probe, a rejected line-search trial). Two methods manage the
+incumbent explicitly:
+
+*   `init_incumbent(z_eval, z_true)`: mark the current values as the initial incumbent,
+    before any evaluation is recorded (e.g. the original sampled center).
+*   `accept_incumbent(z_eval=None, z_true=None)`: retroactively mark the most recently
+    recorded raw evaluation as the newly accepted incumbent, overwriting that same
+    evaluation's `z_k_eval_hist`/`z_k_true_hist` entry in place (defaults to the last raw
+    `Zn`/`Zn_true` values). Used by `GradientDescent` immediately after an accepted
+    line-search or fixed-step evaluation, so acceptance is attributed to the evaluation
+    that produced it rather than the following one.

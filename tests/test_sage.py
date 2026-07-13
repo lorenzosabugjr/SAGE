@@ -34,7 +34,8 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from estimators.sage import SAGE
+from estimators.sage import SAGE, SageStopReason
+from utils.history import HistoryBuffer
 
 
 def constant_objective(_x):
@@ -323,6 +324,47 @@ class SageNoiseCalibrationTests(unittest.TestCase):
 
         self.assertTrue(est.noise_bound_is_fixed)
         self.assertGreater(est.noise_bound, 0.0)
+
+    def test_full_call_marks_attempted_and_fixed_on_noisy_stencil(self):
+        # Milestone 2: the first (centered) gradient call must attempt
+        # calibration and, for a genuinely noisy stencil, switch to
+        # fixed-bound mode -- without changing that outcome.
+        rng = np.random.RandomState(3)
+
+        def noisy(x):
+            return rng.uniform(-0.5, 0.5)
+
+        est = SAGE(noisy, dim=3, init_step=1.0)
+        self.assertFalse(est.calibration_attempted)
+        self.assertFalse(est.calibration_fixed)
+
+        est(np.zeros(3))
+
+        self.assertTrue(est.calibration_attempted)
+        self.assertTrue(est.calibration_fixed)
+        self.assertTrue(est.noise_bound_is_fixed)
+
+    def test_full_call_marks_attempted_without_fixing_on_noiseless_stencil(self):
+        # Milestone 2: a zero-noise seed stencil still attempts calibration
+        # (the gate is entered) but must intentionally leave estimated-noise
+        # mode active -- the existing early-exit behavior is unchanged.
+        est = SAGE(constant_objective, dim=3, init_step=1.0)
+
+        est(np.zeros(3))
+
+        self.assertTrue(est.calibration_attempted)
+        self.assertFalse(est.calibration_fixed)
+        self.assertFalse(est.noise_bound_is_fixed)
+
+    def test_calibration_not_attempted_when_bound_supplied_up_front(self):
+        # A supplied noise_bound short-circuits self-calibration entirely:
+        # there is no estimate-mode gate to enter.
+        est = SAGE(constant_objective, dim=2, init_step=1.0, noise_bound=0.1)
+
+        est(np.zeros(2))
+
+        self.assertFalse(est.calibration_attempted)
+        self.assertFalse(est.calibration_fixed)
 
 
 class SageInformedRadiusTests(unittest.TestCase):
@@ -738,6 +780,143 @@ class SageCertificateStoppingTests(unittest.TestCase):
         est.aux_samples_count = 2.0 * dim
         est._axis_probe_queue = [np.array([1.0, 0.0])]
         self.assertFalse(est._should_stop_refinement())
+
+
+class SageCallDiagnosticsTests(unittest.TestCase):
+    """Milestone 4 (plan_20260712_170450.md): one compact SageCallDiagnostic
+    row per public __call__ invocation, covering a zero-auxiliary return, an
+    auxiliary-refined return, and budget exhaustion."""
+
+    def test_zero_auxiliary_call_records_one_aligned_row(self):
+        # A noiseless quadratic certifies immediately at the seed CFD
+        # stencil: no auxiliary evaluations are needed.
+        est = SAGE(quadratic_objective, dim=2, init_step=0.5)
+        x0 = np.array([5.0, 5.0])
+
+        est(x0)
+
+        self.assertEqual(len(est.call_diagnostics), 1)
+        d = est.call_diagnostics[0]
+        self.assertEqual(d.eval_index, 0)
+        self.assertEqual(d.hist_size, 0)
+        self.assertEqual(d.n_aux, 0)
+        self.assertGreater(d.n_neighbors, 0)
+        self.assertIn(
+            d.stop_reason,
+            (SageStopReason.RELATIVE_CRITERION, SageStopReason.NOISELESS_FLOOR),
+        )
+        # The diagnostic row must reflect the estimator's actual
+        # calibration state after the call, whatever the LP concluded.
+        self.assertTrue(d.calibration_attempted)
+        self.assertEqual(d.calibration_attempted, est.calibration_attempted)
+        self.assertEqual(d.calibration_fixed, est.calibration_fixed)
+
+    def test_auxiliary_refined_call_records_nonzero_aux(self):
+        # A pure-noise objective gives no exploitable gradient signal at the
+        # seed stencil, forcing the refinement loop to run.
+        rng = np.random.RandomState(3)
+
+        def noisy(_x):
+            return rng.uniform(-0.5, 0.5)
+
+        est = SAGE(noisy, dim=2, init_step=1.0)
+
+        est(np.zeros(2))
+
+        self.assertEqual(len(est.call_diagnostics), 1)
+        d = est.call_diagnostics[0]
+        self.assertEqual(d.eval_index, 0)
+        self.assertEqual(d.hist_size, 0)
+        self.assertGreater(d.n_aux, 0)
+        self.assertEqual(d.n_aux, int(est.hist_aux_samples[-1]))
+        self.assertIn(
+            d.stop_reason,
+            (
+                SageStopReason.RELATIVE_CRITERION,
+                SageStopReason.NOISELESS_FLOOR,
+                SageStopReason.AUXILIARY_CAP,
+                SageStopReason.NO_AUX_DIRECTION,
+            ),
+        )
+        self.assertTrue(d.calibration_attempted)
+
+    def test_budget_exhausted_call_records_one_row_and_reraises(self):
+        history = HistoryBuffer()
+        budget = 3
+
+        def fun(x):
+            if history.Zn.size >= budget:
+                raise StopIteration("Budget exhausted")
+            z = float(np.sum(x))
+            history.add(x, z)
+            return z
+
+        est = SAGE(fun, dim=2, init_step=0.5, history=history)
+
+        with self.assertRaises(StopIteration):
+            est(np.zeros(2))
+
+        self.assertEqual(len(est.call_diagnostics), 1)
+        d = est.call_diagnostics[0]
+        self.assertEqual(d.eval_index, 0)
+        self.assertEqual(d.hist_size, 0)
+        self.assertEqual(d.stop_reason, SageStopReason.BUDGET_EXHAUSTION)
+
+    def test_diagnostic_rows_align_one_per_call_with_call_start_state(self):
+        est = SAGE(quadratic_objective, dim=2, init_step=0.5)
+        x0 = np.array([5.0, 5.0])
+
+        est(x0)
+        n_hist_after_first = est.history.Zn.size
+        est(x0, force=True)
+
+        self.assertEqual(len(est.call_diagnostics), 2)
+        self.assertEqual(est.call_diagnostics[0].eval_index, 0)
+        self.assertEqual(est.call_diagnostics[0].hist_size, 0)
+        self.assertEqual(est.call_diagnostics[1].eval_index, n_hist_after_first)
+        self.assertEqual(est.call_diagnostics[1].hist_size, n_hist_after_first)
+
+
+class SageWarmVsColdHistoryFlowTests(unittest.TestCase):
+    """Milestone 5 (plan_20260712_170450.md): history-flow regression
+    comparing a warm second query -- reusing an estimator's own
+    accumulated history -- against a freshly constructed cold query at the
+    same point, without changing SAGE's selector, stopping rule, or
+    numerical settings. This checks that history flows into the next call;
+    it intentionally does not assert a universal evaluation-count advantage
+    from a single synthetic instance (see the PRD's Risks/Non-Goals)."""
+
+    def test_warm_query_call_start_history_exceeds_cold_query(self):
+        rng = np.random.RandomState(7)
+
+        def noisy_quadratic(x):
+            x = np.asarray(x, dtype=float)
+            return float(0.5 * x @ x) + rng.uniform(-0.05, 0.05)
+
+        dim = 2
+        x1 = np.array([3.0, 3.0])
+        x2 = np.array([3.5, 2.5])
+
+        warm = SAGE(noisy_quadratic, dim=dim, init_step=0.1)
+        warm(x1)  # seeds history with the first query's stencil/aux samples
+        hist_before_warm_second_call = warm.history.Zn.size
+        warm(x2)
+
+        cold = SAGE(noisy_quadratic, dim=dim, init_step=0.1)
+        cold(x2)
+
+        self.assertEqual(len(warm.call_diagnostics), 2)
+        self.assertEqual(len(cold.call_diagnostics), 1)
+
+        warm_second_call = warm.call_diagnostics[1]
+        cold_call = cold.call_diagnostics[0]
+
+        # History-flow check only: the warm call starts with the first
+        # query's accumulated samples available; the cold call starts from
+        # nothing. Neither call is asserted to use fewer evaluations.
+        self.assertEqual(warm_second_call.hist_size, hist_before_warm_second_call)
+        self.assertGreater(warm_second_call.hist_size, cold_call.hist_size)
+        self.assertEqual(cold_call.hist_size, 0)
 
 
 if __name__ == "__main__":

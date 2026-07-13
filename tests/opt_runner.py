@@ -64,7 +64,12 @@ class OptimizationTrial:
         # 1. Instantiate Problem
         self.problem = create_problem(problem_name, dims, condnum, randseed=randseed)
 
-        # Objective function wrapper (binds noise params and tracks iterate state).
+        # Objective function wrapper (binds noise params and records every
+        # charged evaluation). Every call is an observation only: it
+        # forward-fills whatever incumbent the shared history currently
+        # holds. Accept/reject decisions are the optimizer's job (see
+        # GradientDescent._mark_incumbent_accepted), applied to this same
+        # evaluation's history entry right after this call returns.
         def obj_func(x):
             # Check budget: every objective call (initial eval, estimator
             # init/auxiliary samples, line-search trial points) counts.
@@ -72,20 +77,10 @@ class OptimizationTrial:
                 raise StopIteration("Budget exhausted")
 
             val = self.problem.eval(x, self.noise_type, self.noise_param)
+            z_true = self.problem.eval(x, self.noise_type, 0.0)
+            t = time.perf_counter() - self.start_time if self.start_time is not None else 0.0
 
-            # Get current iterate state for tracking.
-            if self.solver is not None:
-                z_k_eval = self.solver.z_k
-                z_k_true = self.problem.eval(self.solver.x_k, self.noise_type, 0.0)
-                t = time.perf_counter() - self.start_time if self.start_time is not None else 0.0
-            else:
-                # Before the solver exists, use the evaluated point itself.
-                z_k_eval = val
-                z_k_true = self.problem.eval(x, self.noise_type, 0.0)
-                t = 0.0
-
-            # Add to history with iterate tracking (one entry per evaluation).
-            self.history.add(x, val, z_k_eval=z_k_eval, z_k_true=z_k_true, t=t)
+            self.history.add(x, val, z_true=z_true, t=t)
             return val
         self.obj_func = obj_func
 
@@ -103,14 +98,15 @@ class OptimizationTrial:
         self.Z_initial_eval = self.problem.eval(self.X_initial, self.noise_type, self.noise_param)
         self.Z_initial_true = self.problem.eval(self.X_initial, self.noise_type, 0.0)
 
-        # Shared History Buffer
+        # Shared History Buffer. The original sampled center is the initial
+        # incumbent; every subsequent raw evaluation forward-fills it until
+        # an accepted line-search step moves it.
         self.history = HistoryBuffer()
-        # Add initial point with iterate tracking (before solver exists).
+        self.history.init_incumbent(self.Z_initial_eval, self.Z_initial_true)
         self.history.add(
             self.X_initial,
             self.Z_initial_eval,
-            z_k_eval=self.Z_initial_eval,
-            z_k_true=self.Z_initial_true,
+            z_true=self.Z_initial_true,
             t=0.0,
         )
 
@@ -125,19 +121,13 @@ class OptimizationTrial:
             grad_est_name, self.obj_func, dims, self.history, **est_kwargs
         )
 
-        # Actual optimizer-start point/values. For SAGE, start from the best
-        # point in the (now-initialized) history to match the estimator's
-        # internal state; for all other estimators the start is the initial
-        # sampled point.
+        # Actual optimizer-start point/values. The optimizer always starts at
+        # the original sampled center: this is the point around which SAGE's
+        # initial stencil and first gradient are constructed, so reassigning
+        # the start elsewhere would decenter the estimator's own seed.
         self.X_start = self.X_initial
         self.Z_start_eval = self.Z_initial_eval
         self.Z_start_true = self.Z_initial_true
-        if grad_est_name == "sage":
-            Xn_hist, Zn_hist = self.history.snapshot()
-            best_idx = int(np.argmin(Zn_hist))
-            self.X_start = Xn_hist[best_idx].copy()
-            self.Z_start_eval = Zn_hist[best_idx]
-            self.Z_start_true = self.problem.eval(self.X_start, self.noise_type, 0.0)
 
         # 4. Instantiate Optimizer
         self.solver = GradientDescent(
@@ -174,7 +164,7 @@ class OptimizationTrial:
             # Original sampled initial point.
             "Z_initial_eval": self.Z_initial_eval,
             "Z_initial_true": self.Z_initial_true,
-            # Actual optimizer-start point (post SAGE-history-best reassignment).
+            # Actual optimizer-start point (equals Z_initial_* in current runs).
             "Z_start_eval": self.Z_start_eval,
             "Z_start_true": self.Z_start_true,
             "n_evals": self.history.Zn.size,

@@ -199,6 +199,21 @@ def _run_optimization_benchmark(config_path: str, output_dir: Path, metadata: di
                             trial_error = np.empty(BMK_MAXTRIALS, dtype=object)
                             auxs_hist = np.full(BMK_MAXTRIALS, np.nan) if is_sage else None
 
+                            # Per-call SAGE diagnostics (Milestone 6): one row per
+                            # public SAGE.__call__ invocation, aligned across trials
+                            # and NaN/""-padded like the per-evaluation history above.
+                            # A trial has at most one SAGE call per optimizer step, so
+                            # `max_evals` rows is always enough.
+                            if is_sage:
+                                sage_diag_eval_index = np.full((max_evals, BMK_MAXTRIALS), np.nan)
+                                sage_diag_hist_size = np.full((max_evals, BMK_MAXTRIALS), np.nan)
+                                sage_diag_n_neighbors = np.full((max_evals, BMK_MAXTRIALS), np.nan)
+                                sage_diag_n_aux = np.full((max_evals, BMK_MAXTRIALS), np.nan)
+                                sage_diag_calibration_attempted = np.full((max_evals, BMK_MAXTRIALS), np.nan)
+                                sage_diag_calibration_fixed = np.full((max_evals, BMK_MAXTRIALS), np.nan)
+                                sage_diag_stop_reason = np.full((max_evals, BMK_MAXTRIALS), "", dtype=object)
+                                sage_diag_n_calls = np.zeros(BMK_MAXTRIALS, dtype=int)
+
                             for trial_i in range(BMK_MAXTRIALS):
                                 try:
                                     trial = OptimizationTrial(
@@ -266,6 +281,19 @@ def _run_optimization_benchmark(config_path: str, output_dir: Path, metadata: di
                                     if aux_samples is not None and aux_samples.size > 0:
                                         auxs_hist[trial_i] = float(np.mean(aux_samples))
 
+                                    call_diagnostics = getattr(trial.estimator, "call_diagnostics", None) or []
+                                    n_calls = min(len(call_diagnostics), max_evals)
+                                    sage_diag_n_calls[trial_i] = len(call_diagnostics)
+                                    for ci in range(n_calls):
+                                        d = call_diagnostics[ci]
+                                        sage_diag_eval_index[ci, trial_i] = d.eval_index
+                                        sage_diag_hist_size[ci, trial_i] = d.hist_size
+                                        sage_diag_n_neighbors[ci, trial_i] = d.n_neighbors
+                                        sage_diag_n_aux[ci, trial_i] = d.n_aux
+                                        sage_diag_calibration_attempted[ci, trial_i] = float(d.calibration_attempted)
+                                        sage_diag_calibration_fixed[ci, trial_i] = float(d.calibration_fixed)
+                                        sage_diag_stop_reason[ci, trial_i] = d.stop_reason
+
                                 print(
                                     f"  trial {trial_i}: ok  evals={result['n_evals']}  "
                                     f"final_true={final_true[trial_i]:.6e}"
@@ -312,6 +340,14 @@ def _run_optimization_benchmark(config_path: str, output_dir: Path, metadata: di
                             }
                             if is_sage:
                                 save_dict["auxs_hist"] = auxs_hist
+                                save_dict["sage_diag_n_calls"] = sage_diag_n_calls
+                                save_dict["sage_diag_eval_index"] = sage_diag_eval_index
+                                save_dict["sage_diag_hist_size"] = sage_diag_hist_size
+                                save_dict["sage_diag_n_neighbors"] = sage_diag_n_neighbors
+                                save_dict["sage_diag_n_aux"] = sage_diag_n_aux
+                                save_dict["sage_diag_calibration_attempted"] = sage_diag_calibration_attempted
+                                save_dict["sage_diag_calibration_fixed"] = sage_diag_calibration_fixed
+                                save_dict["sage_diag_stop_reason"] = sage_diag_stop_reason
 
                             save_dict.update(metadata)
                             save_dict.update({

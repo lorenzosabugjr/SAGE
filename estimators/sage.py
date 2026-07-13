@@ -2,10 +2,50 @@ import numpy as np
 import scipy as cp
 import time
 import sys
+from dataclasses import dataclass
 from numpy.linalg import norm
+from scipy.linalg import qr as _pivoted_qr
 from typing import Callable, Optional
 from .base import BaseGradientEstimator
 from utils.history import HistoryBuffer
+
+
+class SageStopReason:
+    """Stable diagnostic codes for why a SAGE call's refinement loop ended
+    (see SAGE._classify_stop_reason and SAGE.__call__). Diagnostic-only:
+    these labels never feed back into estimator decisions."""
+    RELATIVE_CRITERION = "relative_criterion"
+    NOISELESS_FLOOR = "noiseless_floor"
+    FORCED_STOP = "forced_stop"
+    AUXILIARY_CAP = "auxiliary_cap"
+    NO_AUX_DIRECTION = "no_aux_direction"
+    BUDGET_EXHAUSTION = "budget_exhaustion"
+    # Rare defensive path: the LP's x_current drifted from the query point
+    # between the recompute and the refinement loop (see __call__). Not one
+    # of the stopping conditions in _should_stop_refinement.
+    STALE_ESTIMATE = "stale_estimate"
+
+
+@dataclass
+class SageCallDiagnostic:
+    """One compact diagnostic record per public SAGE __call__ invocation.
+
+    eval_index/hist_size are snapshotted before this call adds any
+    evaluations of its own: eval_index is the trial-wide objective-
+    evaluation count (from the shared history used for budget tracking),
+    while hist_size is the size of the raw history actually available to
+    this call's selector (equal to eval_index unless reset_on_step just
+    wiped it) -- the gap between the two is the reuse signal the
+    optimization benchmark is meant to surface.
+    """
+    eval_index: int
+    hist_size: int
+    n_neighbors: int
+    n_aux: int
+    stop_reason: str
+    calibration_attempted: bool
+    calibration_fixed: bool
+
 
 class SAGE(BaseGradientEstimator):
     """
@@ -122,6 +162,21 @@ class SAGE(BaseGradientEstimator):
         self.hist_aux_samples = np.empty((0,))
         self.aux_step_sizes_current = np.empty((0,))
 
+        # Noise self-calibration diagnostics (_maybe_calibrate_noise):
+        # `calibration_attempted` distinguishes "the estimate-mode gate was
+        # entered" from `calibration_fixed`, "the attempt switched to a
+        # fixed noise bound". Neither flag feeds back into estimator
+        # decisions; both are diagnostic-only.
+        self.calibration_attempted = False
+        self.calibration_fixed = False
+
+        # Milestone 4: one compact SageCallDiagnostic per public __call__
+        # invocation. _last_lp_neighbor_count tracks the neighbor count of
+        # the most recently solved LP so the diagnostic row for the
+        # returned estimate reflects the LP that actually produced it.
+        self.call_diagnostics: list[SageCallDiagnostic] = []
+        self._last_lp_neighbor_count = 0
+
         self._last_update_n = None
         self._last_update_x = None
         self.x_current = None
@@ -170,6 +225,16 @@ class SAGE(BaseGradientEstimator):
         # 2*dim+1 seed stencil this bounds a query's total evaluations by
         # (2 + _aux_cap_mult)*dim + 1.
         self._aux_cap_mult = 2.0
+
+        # Hard cap on simplex/IPM iterations for every linprog call. Highly
+        # redundant neighbor sets (e.g. many near-parallel uij directions
+        # from repeated axis-probe stencils) can put HiGHS into a
+        # degenerate, effectively non-terminating iteration sequence with no
+        # internal bound of its own -- observed to burn CPU indefinitely on
+        # an otherwise unremarkable 200x20 LP. Capping maxiter turns that
+        # into a fast res.success=False (already handled by every call
+        # site) instead of a hang.
+        self._lp_maxiter = 10_000
 
         # ── Diagnostic counters ──
         self._diag_lp_count = 0          # total LP solves
@@ -337,13 +402,49 @@ class SAGE(BaseGradientEstimator):
                 coll_x = [coll_x[j] for j in range(len(coll_x)) if in_band[j]]
                 coll_idx_raw = [coll_idx_raw[j] for j in range(len(coll_idx_raw)) if in_band[j]]
 
-        # Quickmode: keep at most 5D nearest-to-search_alpha samples
+        # Quickmode: from the (possibly band-filtered) candidate pool, keep
+        # at most 5D samples chosen by pivoted-QR rank-revealing selection
+        # on their unit displacement directions, rather than pure radius
+        # proximity. A neighbor set dominated by axis-probe stencils is
+        # otherwise mostly duplicate/near-parallel uij directions (only
+        # 2*D distinct axis directions exist, but repeated stencils from
+        # many past iterates keep re-submitting them) -- confirmed on a
+        # real trial to leave >30% of the LP's 200 constraint row-pairs
+        # parallel to |cos|>0.9999, which put HiGHS's linprog into a
+        # non-terminating degenerate-vertex iteration sequence. Pivoted QR
+        # greedily selects the most linearly independent directions first
+        # (scipy.linalg.qr(..., pivoting=True) is the standard rank-
+        # revealing-subset routine), so the selected neighbor set actually
+        # spans R^D instead of massively over-sampling a handful of
+        # directions. Candidates are pre-sorted by proximity to
+        # search_alpha first so that LAPACK's tie-breaking (first-
+        # encountered max-residual column wins) prefers the radius-
+        # appropriate representative whenever several candidates share a
+        # (near-)identical direction; once the true rank is exhausted,
+        # remaining slots are filled in that same radius-proximity order,
+        # preserving the original redundancy-for-noise-averaging intent.
         if len(coll_x) > 5*D and self.quickmode:
-            cost_fn = np.abs(np.sum((np.array(coll_x) - x)**2, axis=1) - search_alpha**2)
-            sort_idx = np.argsort(cost_fn)[:5*D]
+            coll_arr = np.asarray(coll_x)
+            diffs = coll_arr - x
+            dists = norm(diffs, axis=1)
+            dists_safe = np.where(dists == 0.0, 1.0, dists)
+            directions = diffs / dists_safe[:, None]
+            radius_cost = np.abs(dists**2 - search_alpha**2)
+            order_by_radius = np.argsort(radius_cost)
+
+            _, _, piv = _pivoted_qr(
+                directions[order_by_radius].T, mode="economic", pivoting=True
+            )
+            n_keep = min(5 * D, len(order_by_radius))
+            sort_idx = order_by_radius[piv[:n_keep]]
             coll_idx = [coll_idx_raw[j] for j in sort_idx]
         else:
             coll_idx = list(coll_idx_raw)
+
+        # Milestone 4: neighbor count selected for this LP solve. Read at
+        # the end of __call__ so the diagnostic row reflects the LP that
+        # actually produced the returned gradient estimate.
+        self._last_lp_neighbor_count = len(coll_idx)
 
         # [DEEP-DIAG] sample geometry at LP construction
         if self._diag_enabled:
@@ -407,7 +508,7 @@ class SAGE(BaseGradientEstimator):
             A_ub=Ae,
             b_ub=be,
             bounds=(None, None),
-            options={"output_flag": False},
+            options={"output_flag": False, "maxiter": self._lp_maxiter},
         )
         _lp_dt = time.perf_counter() - _lp_t0
         self._diag_lp_count += 1
@@ -496,7 +597,7 @@ class SAGE(BaseGradientEstimator):
             b_ub=self.bl,
             bounds=(None, None),
             method="highs",
-            options={"output_flag": False},
+            options={"output_flag": False, "maxiter": self._lp_maxiter},
         )
         _lp_dt = time.perf_counter() - _lp_t0
         self._diag_lp_count += 1
@@ -680,6 +781,33 @@ class SAGE(BaseGradientEstimator):
             or (self.aux_samples_count >= self._aux_cap_mult * self.dim
                 and not pending_axis_pair)
         )
+
+    def _classify_stop_reason(self) -> Optional[str]:
+        """Diagnostic-only: identify which condition in
+        _should_stop_refinement is currently satisfied, mirroring its
+        boolean structure exactly without altering that method's decision.
+        Returns None if none of the three conditions there currently hold
+        (e.g. the loop is about to exit via the no-auxiliary-direction path
+        instead, which is classified by the caller)."""
+        pending_axis_pair = bool(self._axis_probe_queue)
+        g_norm = max(float(norm(np.asarray(self.gdt_est, dtype=float))), 1e-30)
+        relative_ok = np.isfinite(self.gd_vm) and self.gd_vm < self.rel_tol * g_norm
+        noiseless_ok = (
+            np.isfinite(self.gd_vm)
+            and self.ns_est <= 1e-9
+            and self.gd_vm < self.gdtset_diaid
+        )
+        if self.gdt_est_frc:
+            return SageStopReason.FORCED_STOP
+        if (relative_ok or noiseless_ok) and not pending_axis_pair:
+            return (
+                SageStopReason.RELATIVE_CRITERION
+                if relative_ok
+                else SageStopReason.NOISELESS_FLOOR
+            )
+        if self.aux_samples_count >= self._aux_cap_mult * self.dim and not pending_axis_pair:
+            return SageStopReason.AUXILIARY_CAP
+        return None
 
     def _finish_refinement(self) -> None:
         self.hist_aux_samples = np.hstack((self.hist_aux_samples, self.aux_samples_count))
@@ -911,10 +1039,19 @@ class SAGE(BaseGradientEstimator):
         radius back if the far samples then prove curvature -- and those
         problem types certify at the seed anyway. Calibration runs once per
         estimator lifetime (noise is a property of the oracle, not of the
-        query point) and is skipped entirely when a noise_bound was supplied
-        or the seed LP found the data consistent with zero noise.
+        query point) and is skipped entirely when a noise_bound was
+        supplied up front. It is attempted (`calibration_attempted`) even
+        when the seed LP found the data consistent with zero noise, but
+        that case intentionally leaves estimated-noise mode active rather
+        than fixing a bound (`calibration_fixed` stays False).
         """
-        if self.noise_bound_is_fixed or self.ns_est <= 1e-9:
+        if self.noise_bound_is_fixed:
+            return
+        # Entering estimate mode's calibration gate counts as an attempt
+        # even when the ns_est <= 1e-9 early-exit below intentionally
+        # leaves estimated-noise mode active (no fixed bound needed).
+        self.calibration_attempted = True
+        if self.ns_est <= 1e-9:
             return
         d2s = self._seed_second_differences(np.asarray(x))
         if d2s is None:
@@ -927,6 +1064,7 @@ class SAGE(BaseGradientEstimator):
         self.noise_bound = eps_cal
         self.noise_bound_is_fixed = True
         self.ns_est = eps_cal
+        self.calibration_fixed = True
         if self._diag_enabled:
             print(
                 f"[SAGE-PHASE] call#{self._diag_call_count} "
@@ -1125,6 +1263,28 @@ class SAGE(BaseGradientEstimator):
             )
         return True
 
+    def _record_call_diagnostic(
+        self,
+        eval_index: int,
+        hist_size: int,
+        n_aux: int,
+        stop_reason: str,
+    ) -> None:
+        """Milestone 4: append one SageCallDiagnostic row for this call.
+        Called from every __call__ exit point (normal completion, the
+        stale-estimate early return, and the StopIteration handler), so
+        every public call -- including budget-exhausted ones -- produces
+        exactly one aligned row."""
+        self.call_diagnostics.append(SageCallDiagnostic(
+            eval_index=int(eval_index),
+            hist_size=int(hist_size),
+            n_neighbors=int(self._last_lp_neighbor_count),
+            n_aux=int(n_aux),
+            stop_reason=stop_reason,
+            calibration_attempted=bool(self.calibration_attempted),
+            calibration_fixed=bool(self.calibration_fixed),
+        ))
+
     def __call__(self, x: np.ndarray, force: bool = False) -> np.ndarray:
         """
         Estimate the gradient at point x.
@@ -1154,114 +1314,146 @@ class SAGE(BaseGradientEstimator):
             self.hess_norm = 0.0
             self.ns_est = self.noise_bound if self.noise_bound_is_fixed else 0.0
 
-        sample_added = self._ensure_query_sample(x)
+        # Milestone 4: snapshot call-start state before this call adds any
+        # evaluations of its own. eval_index tracks the trial-wide budget
+        # counter (unaffected by reset_on_step); hist_size tracks what this
+        # call's own history/selector can actually see (0 right after a
+        # reset_on_step wipe).
+        _diag_eval_index = self._shared_history.Zn.size
+        _diag_hist_size = self.history.Zn.size
 
-        history_changed = self._last_update_n is None or self._last_update_n != self.history.Zn.size
-        needs_recompute = force or sample_added or history_changed or x_changed
+        try:
+            sample_added = self._ensure_query_sample(x)
 
-        if self._diag_enabled:
-            print(
-                f"[SAGE-PHASE] call#{self._diag_call_count} "
-                f"recompute={needs_recompute} hist={self.history.Zn.size} "
-                f"reset={self.reset_on_step and x_changed} "
-                f"t={time.perf_counter()-_call_t0:.4f}s",
-                flush=True,
-            )
+            history_changed = self._last_update_n is None or self._last_update_n != self.history.Zn.size
+            needs_recompute = force or sample_added or history_changed or x_changed
 
-        if needs_recompute:
-            _rc_t0 = time.perf_counter()
-            self._recompute_at(x)
             if self._diag_enabled:
                 print(
                     f"[SAGE-PHASE] call#{self._diag_call_count} "
-                    f"recompute done  t={time.perf_counter()-_rc_t0:.4f}s  "
-                    f"diam={self.gd_vm:.4e}  H={self.hess_norm:.4e}  "
-                    f"ns={self.ns_est:.4e}",
-                    flush=True,
-                )
-        else:
-            self.x_current = x
-
-        # Estimate-mode noise self-calibration from the seed stencil's own
-        # second differences (see _maybe_calibrate_noise). No new
-        # evaluations; switches to fixed-bound mode on first success.
-        self._maybe_calibrate_noise(x)
-
-        # Probe-then-batch: if multiple axes are unbounded after the
-        # initial recompute (and possible noise reseed), quickly cover
-        # them with a pilot + batch instead of one-by-one refinement.
-        if np.isinf(self.gd_vm):
-            self._probe_then_batch_inf_axes(x)
-
-        if self._last_update_x is None or not np.array_equal(x, self._last_update_x):
-            if self._diag_enabled:
-                print(
-                    f"[SAGE-PHASE] call#{self._diag_call_count} "
-                    f"early return (x != last_update_x)  "
+                    f"recompute={needs_recompute} hist={self.history.Zn.size} "
+                    f"reset={self.reset_on_step and x_changed} "
                     f"t={time.perf_counter()-_call_t0:.4f}s",
                     flush=True,
                 )
-            return self.gdt_est
 
-        # Size the auxiliary radius to the certificate target, now that the
-        # (possibly recalibrated) seed LP has produced gdt_est and ns_est.
-        self._compute_informed_radius()
-
-        if self._diag_enabled:
-            print(
-                f"[SAGE-PHASE] call#{self._diag_call_count} "
-                f"entering refinement loop  diam={self.gd_vm:.4e}  "
-                f"|g|={norm(np.asarray(self.gdt_est, dtype=float)):.4e}  "
-                f"r*={self._r_target}",
-                flush=True,
-            )
-
-        _refine_aux = 0
-        while True:
-            if self._should_stop_refinement():
+            if needs_recompute:
+                _rc_t0 = time.perf_counter()
+                self._recompute_at(x)
                 if self._diag_enabled:
-                    g_norm = max(float(norm(np.asarray(self.gdt_est, dtype=float))), 1e-30)
                     print(
-                        f"[REFINE-STOP] call#{self._diag_call_count}  "
-                        f"reason: certified={self.gd_vm < self.rel_tol * g_norm or self.gd_vm < self.gdtset_diaid}  "
-                        f"max_aux={self.aux_samples_count >= self._aux_cap_mult*self.dim}  "
-                        f"forced={self.gdt_est_frc}  "
-                        f"axis_q={len(self._axis_probe_queue)}  "
-                        f"diam={self.gd_vm:.4e}  rel_target={self.rel_tol * g_norm:.4e}",
+                        f"[SAGE-PHASE] call#{self._diag_call_count} "
+                        f"recompute done  t={time.perf_counter()-_rc_t0:.4f}s  "
+                        f"diam={self.gd_vm:.4e}  H={self.hess_norm:.4e}  "
+                        f"ns={self.ns_est:.4e}",
                         flush=True,
                     )
-                self._finish_refinement()
-                break
+            else:
+                self.x_current = x
 
-            x_new = self._prepare_aux_sample(x)
-            if x_new is None:
-                break
+            # Estimate-mode noise self-calibration from the seed stencil's own
+            # second differences (see _maybe_calibrate_noise). No new
+            # evaluations; switches to fixed-bound mode on first success.
+            self._maybe_calibrate_noise(x)
 
-            _aux_t0 = time.perf_counter()
-            z_new = self.fun(x_new)
-            _fun_dt = time.perf_counter() - _aux_t0
-            _upd_t0 = time.perf_counter()
-            self.update(x_new, z_new)
-            self._consume_pilot_feedback(x)
-            _upd_dt = time.perf_counter() - _upd_t0
-            _refine_aux += 1
+            # Probe-then-batch: if multiple axes are unbounded after the
+            # initial recompute (and possible noise reseed), quickly cover
+            # them with a pilot + batch instead of one-by-one refinement.
+            if np.isinf(self.gd_vm):
+                self._probe_then_batch_inf_axes(x)
 
-            if self._diag_enabled and (_refine_aux <= 5 or _refine_aux % 10 == 0 or _upd_dt > 2.0):
-                inf_axes = np.where(~np.isfinite(self.gd_v))[0] if np.ndim(self.gd_v) == 1 else []
+            if self._last_update_x is None or not np.array_equal(x, self._last_update_x):
+                if self._diag_enabled:
+                    print(
+                        f"[SAGE-PHASE] call#{self._diag_call_count} "
+                        f"early return (x != last_update_x)  "
+                        f"t={time.perf_counter()-_call_t0:.4f}s",
+                        flush=True,
+                    )
+                self._record_call_diagnostic(
+                    _diag_eval_index, _diag_hist_size, self.aux_samples_count,
+                    SageStopReason.STALE_ESTIMATE,
+                )
+                return self.gdt_est
+
+            # Size the auxiliary radius to the certificate target, now that the
+            # (possibly recalibrated) seed LP has produced gdt_est and ns_est.
+            self._compute_informed_radius()
+
+            if self._diag_enabled:
                 print(
-                    f"[SAGE-REFINE] call#{self._diag_call_count} "
-                    f"aux#{_refine_aux}  alpha={self.aux_step_sizes_current[-1]:.4e}  "
-                    f"fun_t={_fun_dt:.4f}s  upd_t={_upd_dt:.4f}s  "
-                    f"diam={self.gd_vm:.4e}  "
-                    f"n_inf={len(inf_axes)}  "
-                    f"stable={self._stable_count}  "
-                    f"axis_q={len(self._axis_probe_queue)}  "
-                    f"hist={self.history.Zn.size}",
+                    f"[SAGE-PHASE] call#{self._diag_call_count} "
+                    f"entering refinement loop  diam={self.gd_vm:.4e}  "
+                    f"|g|={norm(np.asarray(self.gdt_est, dtype=float)):.4e}  "
+                    f"r*={self._r_target}",
                     flush=True,
                 )
 
-            if self.callback:
-                self.callback()
+            _refine_aux = 0
+            _diag_stop_reason = None
+            _diag_n_aux = 0
+            while True:
+                if self._should_stop_refinement():
+                    _diag_stop_reason = self._classify_stop_reason()
+                    _diag_n_aux = self.aux_samples_count
+                    if self._diag_enabled:
+                        g_norm = max(float(norm(np.asarray(self.gdt_est, dtype=float))), 1e-30)
+                        print(
+                            f"[REFINE-STOP] call#{self._diag_call_count}  "
+                            f"reason: certified={self.gd_vm < self.rel_tol * g_norm or self.gd_vm < self.gdtset_diaid}  "
+                            f"max_aux={self.aux_samples_count >= self._aux_cap_mult*self.dim}  "
+                            f"forced={self.gdt_est_frc}  "
+                            f"axis_q={len(self._axis_probe_queue)}  "
+                            f"diam={self.gd_vm:.4e}  rel_target={self.rel_tol * g_norm:.4e}",
+                            flush=True,
+                        )
+                    self._finish_refinement()
+                    break
+
+                x_new = self._prepare_aux_sample(x)
+                if x_new is None:
+                    _diag_stop_reason = SageStopReason.NO_AUX_DIRECTION
+                    _diag_n_aux = self.aux_samples_count
+                    break
+
+                _aux_t0 = time.perf_counter()
+                z_new = self.fun(x_new)
+                _fun_dt = time.perf_counter() - _aux_t0
+                _upd_t0 = time.perf_counter()
+                self.update(x_new, z_new)
+                self._consume_pilot_feedback(x)
+                _upd_dt = time.perf_counter() - _upd_t0
+                _refine_aux += 1
+
+                if self._diag_enabled and (_refine_aux <= 5 or _refine_aux % 10 == 0 or _upd_dt > 2.0):
+                    inf_axes = np.where(~np.isfinite(self.gd_v))[0] if np.ndim(self.gd_v) == 1 else []
+                    print(
+                        f"[SAGE-REFINE] call#{self._diag_call_count} "
+                        f"aux#{_refine_aux}  alpha={self.aux_step_sizes_current[-1]:.4e}  "
+                        f"fun_t={_fun_dt:.4f}s  upd_t={_upd_dt:.4f}s  "
+                        f"diam={self.gd_vm:.4e}  "
+                        f"n_inf={len(inf_axes)}  "
+                        f"stable={self._stable_count}  "
+                        f"axis_q={len(self._axis_probe_queue)}  "
+                        f"hist={self.history.Zn.size}",
+                        flush=True,
+                    )
+
+                if self.callback:
+                    self.callback()
+
+            self._record_call_diagnostic(
+                _diag_eval_index, _diag_hist_size, _diag_n_aux, _diag_stop_reason,
+            )
+        except StopIteration:
+            # Milestone 4: budget exhaustion mid-call still produces one
+            # diagnostic row for this call before the budget signal
+            # propagates to the trial runner (see opt_runner.OptimizationTrial).
+            self._record_call_diagnostic(
+                _diag_eval_index, _diag_hist_size, self.aux_samples_count,
+                SageStopReason.BUDGET_EXHAUSTION,
+            )
+            raise
 
         _call_dt = time.perf_counter() - _call_t0
         _call_lps = self._diag_lp_count - _call_lp0

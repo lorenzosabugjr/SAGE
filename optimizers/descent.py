@@ -63,6 +63,15 @@ class GradientDescent:
 
         self.gdt_est = np.zeros(self.D)
 
+    def _mark_incumbent_accepted(self) -> None:
+        """Tell the shared history (if any) that the most recently recorded
+        raw evaluation is the newly accepted iterate, so that evaluation's
+        incumbent-history entry reflects it in place instead of one
+        evaluation late."""
+        history = getattr(self.grad_estimator, "history", None)
+        if history is not None:
+            history.accept_incumbent()
+
     def step(self):
         """
         Perform a single optimization step.
@@ -116,6 +125,7 @@ class GradientDescent:
                     self.z_k = z_next
                     self.k += 1
                     self.eta = self.eta / self.armijo_beta
+                    self._mark_incumbent_accepted()
                     if self.verbose:
                         n_hist = getattr(getattr(self.grad_estimator, "history", None), "Zn", np.empty(0)).size
                         print(
@@ -152,6 +162,10 @@ class GradientDescent:
             # Fixed step size
             self.x_k = self.x_k + self.eta0 * p_k
             self.z_k = self.fun(self.x_k)
+            # Mark accepted before update(): a non-lightweight update() can
+            # trigger further (observation-only) evaluations, which must
+            # not be mistaken for this accepted evaluation's own row.
+            self._mark_incumbent_accepted()
             self.grad_estimator.update(self.x_k, self.z_k)
             self.k += 1
             if self.callback:
